@@ -42,8 +42,8 @@ Charts render with TradingView Lightweight Charts, bundled locally
 built-in SVG line/candlestick chart is drawn instead — a chart box
 is never left blank.
 REAL-TIME, not refresh: index quotes and the home line charts tick
-every 5 seconds — the background engine sparks the 3 indices every
-5 s and the browser updates each chart's last point in place
+every 2 seconds — the background engine sparks the 3 indices every
+2 s and the browser updates each chart's last point in place
 (``/api/live``), so the line visibly moves while you watch. No page
 reload, no 60-second wait. The LIVE indicator updates on every
 successful tick. Slower sections (flow, sectors, news, ORB scans)
@@ -126,52 +126,93 @@ CHART_LOCAL = "lightweight-charts.js"
 
 
 def _page(lang: str, title: str, body: str, head_extra: str = "", scripts: str = "",
-          live: bool = False) -> str:
+          live: bool = False, active: str = "") -> str:
     """Page shell. ``live=True`` adds the LIVE indicator + auto-refresh
-    engine (chart pages only — static pages never claim to be live)."""
+    engine (chart pages only — static pages never claim to be live).
+    The header is a professional tab bar (segmented control, active
+    tab highlighted) — never plain text links."""
     t = lambda k: i18n_mod.t(k, lang)
     live_html = ""
     if live:
         live_html = (
             "<p class='muted' id='bhanu-live-indicator' "
-            "title='Live — quotes and index charts tick every few seconds, no page reload'>"
-            "● LIVE — last update --:--:--</p>"
+            "title='Live — quotes and index charts tick every 2 seconds, no page reload'>"
+            "<span class='dot'></span> LIVE · last update --:--:--</p>"
         )
         scripts = scripts + _live_js()
+
+    def _tab(key: str, href: str, label: str) -> str:
+        on = " class='on'" if active == key else ""
+        return f"<a href='{href}'{on}>{label}</a>"
+
     nav = (
-        f'<a href="/?lang={lang}">{t("home")}</a> | '
-        f'<a href="/orb?lang={lang}">{t("orb_scanner")}</a> | '
-        f'<a href="/levels?lang={lang}">{t("levels")}</a> | '
-        f'<a href="/sectors?lang={lang}">Sectors</a> | '
-        f'<a href="/chain?lang={lang}">{t("option_chain")}</a> | '
-        f'<a href="/sizing?lang={lang}">{t("sizing")}</a> | '
-        f'<a href="/paper?lang={lang}">{t("paper_trading")}</a> | '
-        f'<a href="/skills?lang={lang}">{t("skills")}</a> | '
-        f'<a href="/timemachine?lang={lang}">{t("timemachine")}</a> | '
-        f'<a href="?lang=en">EN</a> <a href="?lang=hi">HI</a>'
+        f"<nav class='seg'>"
+        f"{_tab('home', f'/?lang={lang}', t('home'))}"
+        f"{_tab('orb', f'/orb?lang={lang}', t('orb_scanner'))}"
+        f"{_tab('levels', f'/levels?lang={lang}', t('levels'))}"
+        f"{_tab('sectors', f'/sectors?lang={lang}', 'Sectors')}"
+        f"{_tab('chain', f'/chain?lang={lang}', t('option_chain'))}"
+        f"{_tab('sizing', f'/sizing?lang={lang}', t('sizing'))}"
+        f"{_tab('paper', f'/paper?lang={lang}', t('paper_trading'))}"
+        f"{_tab('skills', f'/skills?lang={lang}', t('skills'))}"
+        f"{_tab('timemachine', f'/timemachine?lang={lang}', t('timemachine'))}"
+        f"</nav>"
+        f"<span class='lang'><a href='?lang=en'>EN</a><a href='?lang=hi'>HI</a></span>"
     )
     return f"""<!DOCTYPE html>
 <html lang="en" data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(title)} — Bhanu Indian Day Trader</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
-:root{{--bg:#f7f8fa;--card:#ffffff;--text:#1a1a1a;--muted:#666;--border:#ddd;
---accent:#2962ff;--up:#26a69a;--down:#ef5350;--th:#f0f0f0;--grid:#eee}}
+:root{{--bg:#edf0f3;--card:#ffffff;--text:#141a26;--muted:#6b7385;--border:#d9dee6;
+--accent:#2563eb;--up:#2f9e5f;--down:#d6455d;--upbg:#e7f5ec;--downbg:#fbe9ec;
+--upmid:#9fd8b5;--downmid:#f0a9b5;--blue:#2563eb;--gold:#b7791f;--th:#f1f4f8;--grid:#eef1f5}}
 html[data-theme="dark"]{{--bg:#121417;--card:#1c1f24;--text:#e8e8e8;--muted:#9aa0a6;
---border:#333;--accent:#7aa2ff;--up:#26a69a;--down:#ef5350;--th:#24272c;--grid:#2a2d33}}
-body{{font-family:system-ui,sans-serif;max-width:1020px;margin:24px auto;padding:0 16px;
-line-height:1.5;background:var(--bg);color:var(--text)}}
+--border:#333;--accent:#7aa2ff;--up:#2f9e5f;--down:#d6455d;--upbg:#173425;--downbg:#3a1d22;
+--upmid:#2f9e5f;--downmid:#d6455d;--blue:#7aa2ff;--gold:#b7791f;--th:#24272c;--grid:#2a2d33}}
+body{{font:13px/1.4 Inter,system-ui,sans-serif;max-width:1400px;margin:0 auto;padding:0 22px 22px;
+background:var(--bg);color:var(--text)}}
+.mono{{font-family:"JetBrains Mono",monospace}}
+h1{{font:700 26px "Barlow Condensed",sans-serif;letter-spacing:.5px;margin:14px 0 4px}}
+h2{{font:700 19px "Barlow Condensed",sans-serif;letter-spacing:.6px;text-transform:uppercase;margin:12px 0 4px}}
+h3{{font:700 17px "Barlow Condensed",sans-serif;letter-spacing:.4px;text-transform:uppercase}}
 table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid var(--border);
 padding:6px 8px;text-align:left;overflow-wrap:break-word}}th{{background:var(--th)}}
 .table-wrap{{overflow-x:auto;max-width:100%;box-sizing:border-box}}
 .table-wrap>table{{table-layout:fixed;width:100%}}
 pre{{overflow-x:auto;max-width:100%;box-sizing:border-box}}
 .up{{color:var(--up)}} .down{{color:var(--down)}} .muted{{color:var(--muted)}}
-nav{{margin-bottom:16px}} nav a{{color:var(--accent)}}
-.card{{background:var(--card);border:1px solid var(--border);border-radius:12px;
+#ml-disc{{position:sticky;top:0;z-index:50;background:#fff7e0;border-bottom:1px solid #f1d58a;
+color:#6b4e00;font:12px Inter,system-ui,sans-serif;padding:7px 22px;text-align:center;margin:0 -22px}}
+.ml-top{{display:flex;align-items:center;gap:12px;margin:12px 0 8px}}
+.ml-top h1{{margin:0}}
+.ml-top .sp{{flex:1}}
+nav.seg{{margin:4px 0 12px}}
+nav.seg a{{display:inline-block;padding:6px 12px;font:600 12px Inter,sans-serif;color:var(--text);text-decoration:none}}
+nav.seg a:hover{{color:var(--accent)}}
+.lang{{margin-left:8px}}
+.lang a{{display:inline-block;border:1px solid var(--border);background:var(--card);border-radius:6px;padding:4px 8px;color:var(--text);text-decoration:none;font-size:12px;font-weight:600;margin-left:4px}}
+.lang a:hover{{border-color:var(--accent);color:var(--accent)}}
+.pill{{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);background:var(--card);
+border-radius:999px;padding:4px 11px;font-size:11.5px;font-weight:600}}
+.dot{{width:7px;height:7px;border-radius:50%;background:var(--up);display:inline-block;
+animation:mlpulse 1.6s infinite}}
+@keyframes mlpulse{{0%{{box-shadow:0 0 0 0 rgba(47,158,95,.55)}}70%{{box-shadow:0 0 0 7px rgba(47,158,95,0)}}100%{{box-shadow:0 0 0 0 rgba(47,158,95,0)}}}}
+.seg{{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--card)}}
+.seg button{{border:0;background:none;padding:6px 12px;font:600 12px Inter,sans-serif;color:var(--text);cursor:pointer}}
+.seg button.on,nav.seg a.on{{background:#e6edf8;color:var(--accent)}}
+.card{{background:var(--card);border:1px solid var(--border);border-radius:8px;
 padding:16px;margin:16px 0;box-shadow:0 1px 3px rgba(0,0,0,0.06);
 box-sizing:border-box;max-width:100%}}
 .card h3{{margin-top:0}}
+.ml-h{{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}}
+.ml-h .sub{{color:var(--muted);font-size:11.5px}}
+.ml-h .sp{{flex:1}}
+.ml-h a{{font-size:11.5px;border:1px solid var(--border);background:var(--card);border-radius:6px;
+padding:4px 10px;color:var(--text);text-decoration:none}}
+.note{{color:var(--muted);font-size:10.5px;margin-top:8px}}
 .chart-wrap{{position:relative;width:100%}}
 .chart-box{{width:100%;height:300px}}
 .chart-box.tall{{height:420px}}
@@ -181,19 +222,66 @@ background:var(--card)}}
 border:1px solid var(--border);border-radius:8px;padding:4px 10px;cursor:pointer}}
 .sector-bar{{height:10px;border-radius:5px;background:var(--up)}}
 .sector-bar.down{{background:var(--down)}}
-.index-cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:16px 0}}
-.index-card{{background:var(--card);border:1px solid var(--border);border-radius:12px;
-padding:16px;box-shadow:0 1px 3px rgba(0,0,0,0.06)}}
-.index-name{{font-size:13px;font-weight:600;letter-spacing:.04em;color:var(--muted);text-transform:uppercase}}
-.index-price{{font-size:30px;font-weight:800;line-height:1.2}}
-.index-change{{font-size:18px;font-weight:700}}
-.index-prev{{font-size:12px;color:var(--muted)}}
+.index-cards{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}}
+.icard{{background:var(--card);border:1px solid var(--upmid);border-radius:4px;position:relative;
+height:76px;overflow:hidden}}
+.icard.neg{{border-color:var(--downmid)}}
+.icard .spark{{position:absolute;left:0;top:0;width:100%;height:46px}}
+.icard .lab{{position:absolute;left:6px;top:4px;background:rgba(255,255,255,.92);padding:2px 6px 3px;border-radius:3px;z-index:2}}
+.icard .lab b{{font:700 14px "Barlow Condensed",sans-serif;letter-spacing:.4px;display:block;line-height:1}}
+.icard .foot{{position:absolute;left:0;right:0;bottom:0;height:30px;border-top:1px solid #edf0f3;
+padding:3px 8px;font-size:11px;display:flex;justify-content:space-between;align-items:center;background:var(--card)}}
+.icard .foot b{{font-weight:600;font-family:"JetBrains Mono",monospace}}
 .loading{{color:var(--muted);font-style:italic}}
+.tag{{display:inline-block;font-size:9.5px;font-weight:700;border:1px solid currentColor;border-radius:3px;padding:0 5px;line-height:14px}}
+.tag.bull{{color:var(--up)}}.tag.bear{{color:var(--down)}}
+.counts{{font-size:9.5px;font-weight:700}}
+.counts .n{{font:700 20px "JetBrains Mono",monospace;line-height:1}}
+.sm-stage{{display:flex;gap:10px;align-items:stretch}}
+.sm-spaghetti{{flex:1;min-width:0;position:relative}}
+.sm-waterfall{{width:300px;flex:none;display:flex;flex-direction:column;gap:3px}}
+.tile{{position:relative;flex:1;border:1px solid var(--upmid);background:var(--upbg);border-radius:3px;overflow:hidden;min-height:44px}}
+.tile.bear{{border-color:var(--downmid);background:var(--downbg)}}
+.tile .lab{{position:absolute;left:3px;top:3px;background:rgba(255,255,255,.92);border-radius:2px;padding:1px 4px 2px;z-index:2;max-width:72%}}
+.tile .lab b{{font:700 11.5px "Barlow Condensed",sans-serif;letter-spacing:.3px;display:block;line-height:1.05;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.tile .lab span{{font-size:10px}}
+.tile .rk{{position:absolute;right:3px;top:3px;border:1px solid currentColor;border-radius:2px;font-size:9px;padding:0 3px;background:#fff;z-index:2}}
+.tile .px{{position:absolute;right:0;bottom:0;background:var(--text);color:#fff;font-size:9.5px;font-weight:700;padding:1px 4px;z-index:2}}
+.hz-wrap{{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:12px}}
+.hz-side h3{{margin:16px 0 6px;font-size:13px;font-weight:700}}
+.hz-side h3:first-child{{margin-top:0}}
+.hz-side h3 small{{font-weight:500;color:var(--muted);font-size:11px}}
+.row{{display:grid;grid-template-columns:20px 1fr 90px 60px;gap:6px;align-items:center;font-size:12.5px;padding:2px 0;border-radius:5px}}
+.row:hover{{background:#f3f6fa}}
+.bar{{height:8px;border-radius:2px}}
+.niftysep{{display:flex;justify-content:space-between;border-top:1.5px dashed var(--blue);color:var(--blue);font-size:11px;font-weight:700;padding-top:2px;margin:3px 0}}
+.badge{{font-size:10px;font-weight:800;background:var(--upbg);color:var(--up);border-radius:5px;padding:2px 7px;letter-spacing:.3px}}
+.tpanel{{border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:linear-gradient(180deg,#f7f9fd,#fff);margin:8px 0}}
+.tpanel .tt{{font-size:10px;color:var(--muted);letter-spacing:.6px;font-weight:700;display:flex;justify-content:space-between;gap:6px}}
+.tpanel .tn{{font-weight:700;font-size:12.5px;margin-top:3px}}
+.tpanel .tn .muted{{font-weight:500;font-size:11px}}
+.tpanel .ts{{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin:6px 0}}
+.tpanel .ts div{{background:#f1f4f8;border-radius:6px;padding:4px 6px;font-size:10px;color:var(--muted)}}
+.tpanel .ts b{{display:block;font-size:13.5px;color:var(--text);font-family:"JetBrains Mono",monospace}}
+.tpanel .tr{{display:flex;justify-content:space-between;gap:6px;font-size:10.5px;padding:3px 4px;border-radius:5px;font-family:"JetBrains Mono",monospace}}
+.tpanel .tr:hover{{background:#e9f0fb}}
+.tpanel .rr{{display:flex;height:7px;border-radius:4px;overflow:hidden;margin-top:5px}}
+.tpanel .rr i{{display:block;height:100%}}
+.tpanel .rrl{{display:flex;justify-content:space-between;font-size:10px;margin-top:2px;font-family:"JetBrains Mono",monospace}}
+.tpanel .st{{border-radius:7px;padding:6px 8px;margin:6px 0;font-size:11px;line-height:1.45}}
+.tpanel .st b{{font-size:10.5px;letter-spacing:.3px}}
+.tpanel .st.sig{{background:#e8f6ee;border:1px solid #a7dcbc}}
+.tpanel .st.none{{background:#f4f6f9;border:1px solid var(--border)}}
+.tpanel .st.warn{{background:#fff6dc;border:1px solid #f1d58a}}
+.tpanel .chk{{display:flex;flex-direction:column;gap:1px;margin:3px 0;font-size:11px}}
+.foot{{color:var(--muted);font-size:10.5px;text-align:center;padding:0 0 14px}}
+.divider{{height:1px;background:#d9dee6;margin:8px 0 6px}}
 </style>{head_extra}</head>
-<body><button class="theme-btn" onclick="bhanuTheme()">🌙 / ☀️</button>
-<h1>Bhanu Indian Day Trader</h1><nav>{nav}</nav>
+<body><div id="ml-disc"><b>Paper trading only · not investment advice.</b> Everything on this page is computed on your own computer from public data. Patterns and backtests are not recommendations. You are responsible for your own trades.</div>
+<div class='ml-top'><h1>Bhanu Indian Day Trader</h1><span class='sp'></span><span class='pill'><span class='dot'></span>LIVE</span><button class="theme-btn" onclick="bhanuTheme()">🌙 / ☀️</button></div>
+{nav}
 <h2>{_esc(title)}</h2>{live_html}{body}
-<p class="muted">Paper trading only — no real orders. Educational software, not investment advice.</p>
+<p class="foot">Paper trading only — no real orders. Educational software, not investment advice.</p>
 <script>
 function bhanuTheme(){{
   var h=document.documentElement;
@@ -254,16 +342,30 @@ function bhanuLiveTime(){
   try{return new Date().toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour12:false});}
   catch(e){return new Date().toLocaleTimeString();}
 }
+function bhanuLiveClock(){
+  // 1-second ticking clock: the LIVE line moves every second so the
+  // page never looks frozen while it waits for the next 2-second
+  // data tick. Only runs after the first successful data load
+  // (data-last set) — before that the indicator says "loading…".
+  // The clock shows the current time; "data HH:MM:SS" shows when
+  // data last actually arrived.
+  var el=document.getElementById('bhanu-live-indicator');
+  if(!el){return;}
+  if(!el.getAttribute('data-last')){return;}
+  if(el.getAttribute('data-failed')==='1'){return;}
+  el.innerHTML='<span class="dot"></span> LIVE · '+bhanuLiveTime()+' · data '+el.getAttribute('data-last');
+}
 function bhanuLiveSet(state){
   var el=document.getElementById('bhanu-live-indicator');
   if(!el){return;}
   if(state==='ok'){
-    var t=bhanuLiveTime();
-    el.textContent='● LIVE — last update '+t;
-    el.setAttribute('data-last',t);
+    el.setAttribute('data-last',bhanuLiveTime());
+    el.removeAttribute('data-failed');
+    bhanuLiveClock();
   }else if(state==='fail'){
     var last=el.getAttribute('data-last')||'—';
-    el.textContent='● LIVE — update failed, retrying… (last good '+last+')';
+    el.setAttribute('data-failed','1');
+    el.innerHTML='<span class="dot"></span> LIVE · update failed, retrying… (last good '+last+')';
   }
 }
 function bhanuLiveTick(){
@@ -291,8 +393,11 @@ function bhanuStartLive(){
   if(!ind){return;}
   // Do NOT claim an update yet — the first data load marks it live
   // (bhanuMarkLive) when it actually succeeds.
-  ind.textContent='● LIVE — loading…';
+  ind.innerHTML='<span class="dot"></span> LIVE · loading…';
   setInterval(bhanuLiveTick, BHANU_REFRESH_MS);
+  // The clock ticks every second (see bhanuLiveClock) — the page
+  // never looks frozen between 2-second data ticks.
+  setInterval(bhanuLiveClock, 1000);
   // First refresh cycle shortly after load, so charts that just
   // finished their initial load also get a prompt 60s-cycle tick.
   setTimeout(bhanuLiveTick, 5000);
@@ -341,7 +446,66 @@ function bhanuSvgLine(el, points, color){
   function Y(v){return H-pad-(v-mn)/(mx-mn)*(H-2*pad);}
   var d=points.map(function(p,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(p.value).toFixed(1);}).join(' ');
   var last=points[points.length-1].value;
-  el.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Price chart (simple view)"><path d="'+d+'" fill="none" stroke="'+(color||'#2962ff')+'" stroke-width="2"/><circle cx="'+X(points.length-1)+'" cy="'+Y(last)+'" r="4" fill="'+(color||'#2962ff')+'"/><text x="'+(W-8)+'" y="18" text-anchor="end" font-size="13" font-weight="bold" fill="'+(bhanuDark()?'#fff':'#111')+'">'+last.toLocaleString('en-IN')+'</text></svg><p class="muted">Simple chart view — full chart library could not load.</p>';
+  el.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Price chart (simple view)"><path d="'+d+'" fill="none" stroke="'+(color||'#2563eb')+'" stroke-width="2"/><circle cx="'+X(points.length-1)+'" cy="'+Y(last)+'" r="4" fill="'+(color||'#2563eb')+'"/><text x="'+(W-8)+'" y="18" text-anchor="end" font-size="13" font-weight="bold" fill="'+(bhanuDark()?'#fff':'#111')+'">'+last.toLocaleString('en-IN')+'</text></svg><p class="muted">Simple chart view — full chart library could not load.</p>';
+  // Keep handles so the last point can move in place (bhanuSvgLineLast)
+  // instead of rebuilding the whole SVG on every tick.
+  el._bhanuPath=el.querySelector('path');
+  el._bhanuDot=el.querySelector('circle');
+  el._bhanuText=el.querySelector('text');
+  el._bhanuPoints=points;
+  el._bhanuX=X;
+  el._bhanuY=Y;
+  // Clamp bounds for the in-place last-point move: a tick outside
+  // the initial min/max (common in a trending move) must pin the
+  // dot to the chart edge, never fly off the canvas until the
+  // 5-minute rebase re-scales the range.
+  el._bhanuPad=pad;
+  el._bhanuH=H;
+}
+function bhanuSvgLineLast(el, v){
+  // Move only the last point of an existing SVG line chart — the
+  // path's last segment, the dot and the price label. No innerHTML
+  // rebuild, so the chart never flickers or jumps on a tick.
+  if(!el||!el._bhanuPath||!el._bhanuPoints||!el._bhanuPoints.length){return;}
+  var pts=el._bhanuPoints;
+  pts[pts.length-1].value=v;
+  function Yc(val){
+    var y=el._bhanuY(val);
+    var pad=el._bhanuPad||8, H=el._bhanuH||240;
+    return Math.max(pad,Math.min(H-pad,y));
+  }
+  var d=pts.map(function(p,i){return (i?'L':'M')+el._bhanuX(i).toFixed(1)+' '+Yc(p.value).toFixed(1);}).join(' ');
+  el._bhanuPath.setAttribute('d',d);
+  if(el._bhanuDot){el._bhanuDot.setAttribute('cx',el._bhanuX(pts.length-1));el._bhanuDot.setAttribute('cy',Yc(v));}
+  if(el._bhanuText){el._bhanuText.textContent=Number(v).toLocaleString('en-IN');}
+}
+function bhanuEase(t){return t<0.5?2*t*t:1-Math.pow(-2*t+2,2)/2;}
+function bhanuAnimLast(id, symbol, fromVal, toVal, time){
+  // Glide the chart's last point from the old price to the new one
+  // (~0.9 s ease) instead of jumping in one step: the line flows
+  // instead of stopping for 2 s and then stepping. One animation per
+  // chart — a newer tick cancels the older one. The header price
+  // glides along too, so the card never looks frozen either.
+  var st=window.bhanuLines[id];if(!st){return;}
+  if(fromVal===toVal){return;}
+  var slug={'^NSEI':'nsei','^NSEBANK':'nsebank','^BSESN':'bsesn'}[symbol];
+  var token=(st.animToken||0)+1;st.animToken=token;
+  var raf=window.requestAnimationFrame||function(fn){return setTimeout(function(){fn(Date.now());},16);};
+  var start=null;
+  function frame(ts){
+    if(st.animToken!==token){return;}
+    if(start===null){start=ts;}
+    var k=Math.min(1,(ts-start)/900);
+    var v=fromVal+(toVal-fromVal)*bhanuEase(k);
+    if(st.series){try{st.series.update({time:time,value:v});}catch(e){}}
+    else if(st.el){
+      if(!st.el._bhanuPath){bhanuSvgLine(st.el,st.line||[],st.color||'#2563eb');}
+      bhanuSvgLineLast(st.el,v);
+    }
+    if(slug){var pe=document.getElementById('q-'+slug+'-price');if(pe){pe.textContent=Number(v).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}}
+    if(k<1){raf(frame);}
+  }
+  raf(frame);
 }
 function bhanuSvgCandles(el, candles){
   if(!candles||!candles.length){bhanuUnavailable(el,'no price data');return;}
@@ -354,7 +518,7 @@ function bhanuSvgCandles(el, candles){
   var s='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Candlestick chart (simple view)">';
   candles.forEach(function(c,i){
     var x=pad+i*bw+bw*0.2, w=Math.max(1,bw*0.6);
-    var col=c.close>=c.open?'#26a69a':'#ef5350';
+    var col=c.close>=c.open?'#2f9e5f':'#d6455d';
     s+='<line x1="'+(x+w/2).toFixed(1)+'" y1="'+Y(c.high).toFixed(1)+'" x2="'+(x+w/2).toFixed(1)+'" y2="'+Y(c.low).toFixed(1)+'" stroke="'+col+'" stroke-width="1"/>';
     s+='<rect x="'+x.toFixed(1)+'" y="'+Y(Math.max(c.open,c.close)).toFixed(1)+'" width="'+w.toFixed(1)+'" height="'+Math.max(1,Math.abs(Y(c.open)-Y(c.close))).toFixed(1)+'" fill="'+col+'"/>';
   });
@@ -362,22 +526,90 @@ function bhanuSvgCandles(el, candles){
   el.innerHTML=s;
 }
 function bhanuSvgFlow(el, series){
+  // Spaghetti chart: every stock's intraday % move since the open —
+  // green above zero, red below, NIFTY dashed blue. Sector labels on
+  // the left sit at each sector's median last move.
   if(!series||!series.length){bhanuUnavailable(el,'no flow data');return;}
-  var W=900,H=300,pad=8;
+  var W=960,H=560,padL=64,padR=8,padT=10,padB=26;
   var mn=0,mx=0;
   series.forEach(function(s){s.line.forEach(function(p){if(p.value<mn){mn=p.value;}if(p.value>mx){mx=p.value;}});});
-  if(mx===mn){mx=mn+1;}
+  if(mx-mn<0.5){var mid=(mx+mn)/2;mn=mid-0.25;mx=mid+0.25;}
   var maxLen=Math.max.apply(null,series.map(function(s){return s.line.length;}));
-  function X(i){return pad+i/(maxLen-1||1)*(W-2*pad);}
-  function Y(v){return H-pad-(v-mn)/(mx-mn)*(H-2*pad);}
-  var s='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Smart Money Flow (simple view)">';
-  series.forEach(function(ser){
-    var col=ser.is_index?'#2962ff':(ser.up?'#26a69a':'#ef5350');
-    var d=ser.line.map(function(p,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(p.value).toFixed(1);}).join(' ');
-    s+='<path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="'+(ser.is_index?2:1)+'" opacity="0.7"/>';
+  function X(i){return padL+i/(maxLen-1||1)*(W-padL-padR);}
+  function Y(v){return padT+(mx-v)/(mx-mn)*(H-padT-padB);}
+  function fmtT(t){try{return new Date(t*1000).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});}catch(e){return '';}}
+  var s='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Smart Money Flow — every stock since the open">';
+  var step=1;
+  for(var g=Math.ceil(mn/step)*step;g<=mx;g+=step){
+    s+='<line x1="'+padL+'" y1="'+Y(g).toFixed(1)+'" x2="'+(W-padR)+'" y2="'+Y(g).toFixed(1)+'" stroke="'+(g===0?'#999':'#e5e7eb')+'" stroke-width="'+(g===0?'1.5':'1')+'"/>';
+    s+='<text x="'+(padL-6)+'" y="'+(Y(g)+3.5).toFixed(1)+'" text-anchor="end" font-size="10" fill="#6b7385">'+(g>0?'+':'')+g.toFixed(0)+'%</text>';
+  }
+  [0,0.25,0.5,0.75,1].forEach(function(f){
+    var idx=Math.round(f*(maxLen-1));
+    var t=series[0].line[Math.min(idx,series[0].line.length-1)];
+    if(t){s+='<text x="'+X(idx).toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle" font-size="10" fill="#6b7385">'+fmtT(t.time)+'</text>';}
   });
-  s+='</svg><p class="muted">Simple chart view — full chart library could not load.</p>';
+  var ordered=series.slice().sort(function(a,b){return (a.is_index?1:0)-(b.is_index?1:0);});
+  ordered.forEach(function(ser){
+    var col=ser.is_index?'#2563eb':(ser.up?'#2f9e5f':'#d6455d');
+    var d=ser.line.map(function(p,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(p.value).toFixed(1);}).join(' ');
+    s+='<path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="'+(ser.is_index?2:1)+'"'+(ser.is_index?' stroke-dasharray="6 4"':'')+' opacity="'+(ser.is_index?1:0.55)+'"/>';
+  });
+  var bySec={};
+  series.forEach(function(ser){if(ser.is_index||!ser.sector){return;}var v=ser.line[ser.line.length-1].value;(bySec[ser.sector]=bySec[ser.sector]||[]).push(v);});
+  var labs=Object.keys(bySec).map(function(k){var vs=bySec[k].slice().sort(function(a,b){return a-b;});return {name:k,v:vs[Math.floor(vs.length/2)]};}).sort(function(a,b){return b.v-a.v;});
+  var lastY=-99;
+  labs.forEach(function(l){
+    var y=Y(l.v);
+    if(y-lastY<14){return;}
+    lastY=y;
+    s+='<text x="4" y="'+(y+3.5).toFixed(1)+'" font-size="10" font-weight="700" fill="#141a26">'+l.name.toUpperCase()+'</text>';
+  });
+  var nif=series.filter(function(x){return x.is_index;})[0];
+  if(nif){var lv=nif.line[nif.line.length-1].value;s+='<text x="'+(W-padR)+'" y="'+(Y(lv)-6).toFixed(1)+'" text-anchor="end" font-size="11" font-weight="700" fill="#2563eb">NIFTY '+(lv>=0?'+':'')+lv.toFixed(2)+'%</text>';}
+  s+='</svg>';
   el.innerHTML=s;
+}
+function bhanuWaterfall(el, series){
+  // Strongest / weakest tiles with mini sparklines (right of spaghetti).
+  if(!series||!series.length){el.innerHTML='';return;}
+  var sorted=series.slice().filter(function(s){return !s.is_index;}).sort(function(a,b){return b.change_pct-a.change_pct;});
+  function tile(s, rank){
+    var pts=s.line.slice(-60);
+    var W=120,H=30,pad=2;
+    var vals=pts.map(function(p){return p.value;});
+    var mn=Math.min.apply(null,vals),mx=Math.max.apply(null,vals);
+    if(mx===mn){mx=mn+1;}
+    function X(i){return pad+i/(pts.length-1||1)*(W-2*pad);}
+    function Y(v){return H-pad-(v-mn)/(mx-mn)*(H-2*pad);}
+    var d=pts.map(function(p,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(p.value).toFixed(1);}).join(' ');
+    var col=s.up?'#2f9e5f':'#d6455d';
+    return '<div class="tile'+(s.up?'':' bear')+'"><svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%"><path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="1.2" opacity="0.8"/></svg><div class="lab"><b>'+s.symbol+'</b><span>'+(s.sector||'')+'</span></div><span class="rk">'+rank+'</span><span class="px">'+(s.change_pct>=0?'+':'')+s.change_pct.toFixed(2)+'%</span></div>';
+  }
+  var html='<div class="counts" style="display:flex;gap:14px;margin-bottom:4px"><span class="up">▲ STRONGEST</span><span class="down">▼ WEAKEST</span></div>';
+  sorted.slice(0,5).forEach(function(s,i){html+=tile(s,i+1);});
+  sorted.slice(-5).reverse().forEach(function(s,i){html+=tile(s,'−'+(i+1));});
+  el.innerHTML=html;
+}
+function bhanuSpark(id, points){
+  // Tiny sparkline for an index tile: one thin line, no axes.
+  var el=document.getElementById(id);if(!el||!points||points.length<2){return;}
+  var pts=points.slice(-120);
+  var W=300,H=46,pad=2;
+  var vals=pts.map(function(p){return p.value;});
+  var mn=Math.min.apply(null,vals),mx=Math.max.apply(null,vals);
+  if(mx===mn){mx=mn+1;}
+  function X(i){return pad+i/(pts.length-1||1)*(W-2*pad);}
+  function Y(v){return H-pad-(v-mn)/(mx-mn)*(H-2*pad);}
+  var up=vals[vals.length-1]>=vals[0];
+  var col=up?'#2f9e5f':'#d6455d';
+  var d=pts.map(function(p,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(p.value).toFixed(1);}).join(' ');
+  el.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" style="width:100%;height:100%;display:block" role="img" aria-label="Sparkline"><path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="1.5"/><circle cx="'+X(pts.length-1)+'" cy="'+Y(vals[vals.length-1])+'" r="2.5" fill="'+col+'"/></svg>';
+}
+function bhanuSparkFor(symbol, line){
+  var map={'^NSEI':'q-nsei-spark','^NSEBANK':'q-nsebank-spark','^BSESN':'q-bsesn-spark'};
+  var id=map[symbol];if(!id){return;}
+  try{bhanuSpark(id,line);}catch(e){}
 }
 function bhanuFetchJson(url, timeoutMs){
   // fetch() with a timeout: a hung request must surface as an error
@@ -399,66 +631,82 @@ function bhanuFetchJson(url, timeoutMs){
   });
 }
 function bhanuLiveLineTick(id, symbol){
-  // One live tick: fetch the latest price and move the line's end in
-  // place — append when the market clock advanced, else update the
-  // last point's value. No reload, no full re-fetch.
+  // One live tick: fetch the latest price and glide the line's end
+  // to it in place (bhanuAnimLast) — never a full re-fetch, never a
+  // jump. When the market clock advanced, the new bar starts at the
+  // old value and glides to the new one.
   var st=window.bhanuLines[id];if(!st){return Promise.reject(new Error('no line'));}
   return bhanuFetchJson('/api/live?symbol='+encodeURIComponent(symbol)).then(function(p){
     if(!p||p.error||p.ltp===null||p.ltp===undefined){throw new Error(p&&p.error?p.error:'no live data');}
     var t=p.time||0, v=Number(p.ltp);
+    var from=st.lastValue;
+    if(from===undefined||from===null){
+      var line0=st.line||[];
+      from=line0.length?line0[line0.length-1].value:v;
+    }
     if(st.series){
-      if(t>st.lastTime){st.series.update({time:t,value:v});st.lastTime=t;}
-      else{st.series.update({time:st.lastTime,value:v});}
+      if(t>st.lastTime){st.lastTime=t;}
+      bhanuAnimLast(id,symbol,from,v,st.lastTime);
     }else if(st.el){
       var line=st.line||[];if(!line.length){throw new Error('no line data');}
       var last=line[line.length-1];
-      if(t>last.time){line.push({time:t,value:v});}else{last.value=v;}
-      bhanuSvgLine(st.el,line,st.color||'#2962ff');
+      if(t>last.time){line.push({time:t,value:from});}
+      bhanuAnimLast(id,symbol,from,v,last.time);
     }
+    st.lastValue=v;
     if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
+    bhanuSparkFor(symbol,p.line);
   });
 }
 function bhanuStartLiveLine(id, symbol){
-  // A line chart ticks every 5 seconds once it has drawn. Every 60th
+  // A line chart ticks every 2 seconds once it has drawn. Every 150th
   // tick (~5 minutes) it quietly rebases to fresh 5m bars, so the
   // 1-minute live tail never drifts from the real candles.
   if(!symbol||window.bhanuLiveTimers[id]){return;}
   var ticks=0;
   var run=function(){
     ticks++;
-    if(ticks%60===0){
+    if(ticks%150===0){
       bhanuFetchJson('/api/intraday?symbol='+encodeURIComponent(symbol)).then(function(p2){
         var st=window.bhanuLines[id];
         if(p2&&!p2.error&&p2.line&&p2.line.length&&st){
-          if(st.series){st.series.setData(p2.line);}
-          st.line=p2.line.slice();
-          st.lastTime=p2.line[p2.line.length-1].time;
-          if(st.el){bhanuSvgLine(st.el,p2.line,st.color||'#2962ff');}
+          var nl=p2.line.slice();
+          if(st.series){st.series.setData(nl);}
+          st.line=nl;
+          st.lastTime=nl[nl.length-1].time;
+          st.lastValue=nl[nl.length-1].value;
+          if(st.el){bhanuSvgLine(st.el,nl,st.color||'#2563eb');}
+          bhanuSparkFor(symbol,p2.line);
         }
       }).catch(function(){});
       return;
     }
     bhanuLiveLineTick(id,symbol).catch(function(){});
   };
-  window.bhanuLiveTimers[id]=setInterval(run,5000);
+  window.bhanuLiveTimers[id]=setInterval(run,2000);
   run();
 }
 function bhanuLineRender(id, p, symbol){
   var el=document.getElementById(id);if(!el)return;
   if(!p||!p.line||p.line.length===0){bhanuUnavailable(el,p&&p.error?p.error:'no price data');return;}
   var lastTime=p.line[p.line.length-1].time;
+  var lastVal=p.line[p.line.length-1].value;
+  bhanuSparkFor(symbol,p.line);
   if(typeof LightweightCharts==='undefined'){
-    bhanuSvgLine(el,p.line,p.color||'#2962ff');
-    window.bhanuLines[id]={el:el,series:null,line:p.line.slice(),lastTime:lastTime,color:p.color||'#2962ff'};
+    // One array object for both the state and the SVG refs, so the
+    // in-place last-point update sees the same points.
+    var line=p.line.slice();
+    bhanuSvgLine(el,line,p.color||'#2563eb');
+    window.bhanuLines[id]={el:el,series:null,line:line,lastTime:lastTime,lastValue:lastVal,color:p.color||'#2563eb'};
     bhanuStartLiveLine(id,symbol);
     return;
   }
   var o=bhanuChartOpts(260);o.width=el.clientWidth||900;
   var ch=LightweightCharts.createChart(el,o);
-  var s=ch.addLineSeries({color:p.color||'#2962ff',lineWidth:2});
+  var s=ch.addLineSeries({color:p.color||'#2563eb',lineWidth:2});
   s.setData(p.line);ch.timeScale().fitContent();
   window.addEventListener('resize',function(){ch.applyOptions({width:el.clientWidth||900});});
-  window.bhanuLines[id]={el:el,series:s,line:p.line.slice(),lastTime:lastTime,color:p.color||'#2962ff'};
+  window.bhanuLines[id]={el:el,series:s,line:p.line.slice(),lastTime:lastTime,lastValue:lastVal,color:p.color||'#2563eb'};
   bhanuStartLiveLine(id,symbol);
 }
 function bhanuLineChart(id, symbol){
@@ -490,38 +738,20 @@ function bhanuLazyLine(id, symbol){
   });
 }
 function bhanuFlowRender(id, p){
+  // The reference chart is a hand-drawn SVG spaghetti (thin green/red
+  // lines, dashed blue NIFTY) — it renders instantly with zero chart
+  // library load, exactly like the copy's engine already does. The
+  // waterfall tiles on the right rank strongest / weakest.
   var el=document.getElementById(id);if(!el)return false;
-  if(typeof LightweightCharts==='undefined'){
-    bhanuSvgFlow(el,p.series);
-    var leg0=document.getElementById(id+'-legend');
-    var up0=0,down0=0;
-    p.series.forEach(function(s){if(s.up){up0++;}else{down0++;}});
-    if(leg0){leg0.textContent=up0+' up / '+down0+' down — each line is one stock\\'s intraday % change (NIFTY = blue). Failed: '+(p.failed?p.failed.length:0)+'. As of '+p.as_of+'.';}
-    return true;
-  }
-  var st=window.bhanuFlow=window.bhanuFlow||{};
-  if(!st.chart){
-    el.innerHTML='';
-    var o=bhanuChartOpts(340);o.width=el.clientWidth||900;
-    st.chart=LightweightCharts.createChart(el,o);
-    st.series={};
-    window.addEventListener('resize',function(){st.chart.applyOptions({width:el.clientWidth||900});});
-  }
+  bhanuSvgFlow(el,p.series);
   var up=0,down=0;
-  p.series.forEach(function(s){
-    if(s.up){up++;}else{down++;}
-    var col=s.is_index?'#2962ff':(s.up?'#26a69a':'#ef5350');
-    var ls=st.series[s.symbol];
-    if(!ls){
-      ls=st.chart.addLineSeries({color:col,lineWidth:s.is_index?3:1,
-        priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false});
-      st.series[s.symbol]=ls;
-    }
-    ls.setData(s.line);
-  });
-  st.chart.timeScale().fitContent();
+  p.series.forEach(function(s){if(s.up){up++;}else{down++;}});
   var leg=document.getElementById(id+'-legend');
-  if(leg){leg.textContent=up+' up / '+down+' down — each line is one stock\\'s intraday % change (NIFTY = blue). Failed: '+(p.failed?p.failed.length:0)+'. As of '+p.as_of+'.';}
+  if(leg){leg.textContent=up+' up / '+down+' down — each line is one stock\\'s intraday % change (NIFTY = blue dashed). Failed: '+(p.failed?p.failed.length:0)+'. As of '+p.as_of+'.';}
+  var cnt=document.getElementById(id+'-counts');
+  if(cnt){cnt.innerHTML='<span class="up">▲ BULLISH <b>'+up+'</b></span><span class="down">▼ BEARISH <b>'+down+'</b></span>';}
+  var wf=document.getElementById(id+'-waterfall');
+  if(wf){bhanuWaterfall(wf,p.series);}
   return true;
 }
 function bhanuFlowChart(id){
@@ -540,37 +770,65 @@ function bhanuFlowChart(id){
   }).catch(function(e){bhanuUnavailable(el,'could not load flow data');});
 }
 function bhanuSectorRender(id, p){
+  // Horizon view: pale green above the NIFTY line, pale pink below it.
+  // Dashed blue NIFTY line, bubbles sized by traded value, RUNNING
+  // badge on sectors beating NIFTY by >1%. Ranked rows on the right.
   var el=document.getElementById(id);if(!el)return false;
-  var W=620,H=340,pad=30;
-  var rels=p.sectors.map(function(s){return s.rel_pct===null?0:s.rel_pct;});
-  var chs=p.sectors.map(function(s){return s.change_pct;});
-  var x0=Math.min.apply(null,rels.concat([0]))-0.2,x1=Math.max.apply(null,rels.concat([0]))+0.2;
-  var y0=Math.min.apply(null,chs.concat([0]))-0.2,y1=Math.max.apply(null,chs.concat([0]))+0.2;
+  var W=960,H=620,padL=40,padR=16,padT=16,padB=44;
+  var nifty=p.nifty_change===null||p.nifty_change===undefined?0:p.nifty_change;
+  var chs=p.sectors.map(function(s){return s.change_pct;}).concat([nifty,0]);
+  var rels=p.sectors.map(function(s){return s.rel_pct===null?0:s.rel_pct;}).concat([0]);
+  var y0=Math.min.apply(null,chs)-0.2,y1=Math.max.apply(null,chs)+0.2;
+  var x0=Math.min.apply(null,rels)-0.2,x1=Math.max.apply(null,rels)+0.2;
   var maxV=Math.max.apply(null,p.sectors.map(function(s){return s.traded_value||1;}));
-  function X(v){return pad+(v-x0)/(x1-x0)*(W-2*pad);}
-  function Y(v){return H-pad-(v-y0)/(y1-y0)*(H-2*pad);}
+  function X(v){return padL+(v-x0)/(x1-x0)*(W-padL-padR);}
+  function Y(v){return padT+(y1-v)/(y1-y0)*(H-padT-padB);}
+  var yn=Y(nifty);
   var svg='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Sector map">';
-  svg+='<line x1="'+X(0)+'" y1="'+pad+'" x2="'+X(0)+'" y2="'+(H-pad)+'" stroke="#999" stroke-dasharray="4 4"/>';
-  svg+='<line x1="'+pad+'" y1="'+Y(0)+'" x2="'+(W-pad)+'" y2="'+Y(0)+'" stroke="#999" stroke-dasharray="4 4"/>';
+  svg+='<rect x="'+padL+'" y="'+padT+'" width="'+(W-padL-padR)+'" height="'+Math.max(0,yn-padT)+'" fill="#e7f5ec"/>';
+  svg+='<rect x="'+padL+'" y="'+yn+'" width="'+(W-padL-padR)+'" height="'+Math.max(0,H-padB-yn)+'" fill="#fbe9ec"/>';
+  for(var g=Math.ceil(y0*2)/2;g<=y1;g+=0.5){
+    svg+='<line x1="'+padL+'" y1="'+Y(g).toFixed(1)+'" x2="'+(W-padR)+'" y2="'+Y(g).toFixed(1)+'" stroke="#e5e7eb" stroke-width="1"/>';
+    svg+='<text x="'+(padL-5)+'" y="'+(Y(g)+3.5).toFixed(1)+'" text-anchor="end" font-size="10" fill="#6b7385">'+(g>0?'+':'')+g.toFixed(1)+'%</text>';
+  }
+  svg+='<line x1="'+padL+'" y1="'+yn.toFixed(1)+'" x2="'+(W-padR)+'" y2="'+yn.toFixed(1)+'" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="6 4"/>';
+  svg+='<text x="'+(W-padR)+'" y="'+(yn-5).toFixed(1)+'" text-anchor="end" font-size="11" font-weight="700" fill="#2563eb">NIFTY '+(nifty>=0?'+':'')+nifty.toFixed(2)+'%</text>';
   p.sectors.forEach(function(s){
-    var r=18+42*Math.sqrt((s.traded_value||1)/maxV);
-    var col=s.up?'#26a69a':'#ef5350';
-    svg+='<circle cx="'+X(s.rel_pct===null?0:s.rel_pct).toFixed(1)+'" cy="'+Y(s.change_pct).toFixed(1)+'" r="'+r.toFixed(1)+'" fill="'+col+'" fill-opacity="0.55" stroke="'+col+'" stroke-width="2"/>';
-    svg+='<text x="'+X(s.rel_pct===null?0:s.rel_pct).toFixed(1)+'" y="'+(Y(s.change_pct)-4).toFixed(1)+'" text-anchor="middle" font-size="12" font-weight="bold" fill="'+(bhanuDark()?'#fff':'#111')+'">'+s.name+'</text>';
-    svg+='<text x="'+X(s.rel_pct===null?0:s.rel_pct).toFixed(1)+'" y="'+(Y(s.change_pct)+12).toFixed(1)+'" text-anchor="middle" font-size="11" fill="'+(bhanuDark()?'#fff':'#111')+'">'+(s.change_pct>=0?'+':'')+s.change_pct.toFixed(2)+'%</text>';
+    var r=16+40*Math.sqrt((s.traded_value||1)/maxV);
+    var cx=X(s.rel_pct===null?0:s.rel_pct),cy=Y(s.change_pct);
+    var col=s.up?'#2f9e5f':'#d6455d';
+    if(s.rel_pct!==null&&s.rel_pct>1){
+      svg+='<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="'+r.toFixed(1)+'" fill="none" stroke="'+col+'" stroke-width="2"><animate attributeName="r" values="'+r.toFixed(1)+';'+(r+12).toFixed(1)+'" dur="1.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.9;0" dur="1.6s" repeatCount="indefinite"/></circle>';
+      svg+='<text x="'+cx.toFixed(1)+'" y="'+(cy-r-8).toFixed(1)+'" text-anchor="middle" font-size="9" font-weight="800" fill="'+col+'">RUNNING</text>';
+    }
+    svg+='<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="'+r.toFixed(1)+'" fill="'+col+'" fill-opacity="0.55" stroke="'+col+'" stroke-width="2"/>';
+    svg+='<text x="'+cx.toFixed(1)+'" y="'+(cy-4).toFixed(1)+'" text-anchor="middle" font-size="12" font-weight="bold" fill="'+(bhanuDark()?'#fff':'#141a26')+'">'+s.name+'</text>';
+    svg+='<text x="'+cx.toFixed(1)+'" y="'+(cy+12).toFixed(1)+'" text-anchor="middle" font-size="11" fill="'+(bhanuDark()?'#fff':'#141a26')+'">'+(s.change_pct>=0?'+':'')+s.change_pct.toFixed(2)+'%</text>';
   });
-  svg+='<text x="'+(W/2)+'" y="'+(H-6)+'" text-anchor="middle" font-size="11" fill="#888">x = sector vs NIFTY (%) — right = beating NIFTY</text>';
-  svg+='<text x="10" y="14" font-size="11" fill="#888">y = sector % change — up = green</text>';
+  var cats={'TECH & MEDIA':['IT','Telecom'],'FINANCIALS':['Banks','Financials'],'HEALTHCARE':['Pharma'],'CONSUMPTION':['FMCG','Auto'],'COMMODITIES & ENERGY':['Metals','Energy'],'INDUSTRIALS & PSU':['Infra']};
+  Object.keys(cats).forEach(function(c){
+    var xs=cats[c].map(function(n){var s=p.sectors.filter(function(x){return x.name===n;})[0];return s?(s.rel_pct===null?0:s.rel_pct):null;}).filter(function(v){return v!==null;});
+    if(!xs.length){return;}
+    var mx=xs.reduce(function(a,b){return a+b;},0)/xs.length;
+    svg+='<text x="'+X(mx).toFixed(1)+'" y="'+(H-24)+'" text-anchor="middle" font-size="10" font-weight="700" fill="#6b7385">'+c+'</text>';
+  });
+  svg+='<text x="'+padL+'" y="'+(H-6)+'" font-size="11" fill="#6b7385">x = sector vs NIFTY (%) — right = beating NIFTY · bubble size = traded value</text>';
   svg+='</svg>';
   el.innerHTML=svg;
   var list=document.getElementById(id+'-list');
   if(list){
-    var html='<div class="table-wrap"><table><tr><th>Sector</th><th>% change</th><th>vs NIFTY</th><th>Stocks</th><th></th></tr>';
-    p.sectors.forEach(function(s){
+    var sorted=p.sectors.slice().sort(function(a,b){return b.change_pct-a.change_pct;});
+    var beating=sorted.filter(function(s){return s.rel_pct!==null&&s.rel_pct>0;});
+    var html='<h3>Themes beating NIFTY <small>'+beating.length+' of '+p.sectors.length+' sectors</small></h3>';
+    sorted.forEach(function(s,i){
       var w=Math.min(100,Math.abs(s.change_pct)*40);
-      html+='<tr><td>'+s.name+'</td><td class="'+(s.up?'up':'down')+'">'+(s.change_pct>=0?'+':'')+s.change_pct.toFixed(2)+'%</td><td>'+(s.rel_pct===null?'—':((s.rel_pct>=0?'+':'')+s.rel_pct.toFixed(2)+'%'))+'</td><td>'+s.stocks+'</td><td style="width:35%"><div class="sector-bar'+(s.up?'':' down')+'" style="width:'+w+'%"></div></td></tr>';
+      html+='<div class="row"><span class="muted">'+(i+1)+'</span><span>'+s.name+'</span><span><div class="bar" style="width:'+w+'%;background:'+(s.up?'#2f9e5f':'#d6455d')+'"></div></span><span class="'+(s.up?'up':'down')+'">'+(s.change_pct>=0?'+':'')+s.change_pct.toFixed(2)+'%</span></div>';
+      if(i===beating.length-1&&beating.length>0&&beating.length<sorted.length){
+        html+='<div class="niftysep"><span>NIFTY '+(nifty>=0?'+':'')+nifty.toFixed(2)+'%</span><span>beating ↓ / lagging ↑</span></div>';
+      }
     });
-    list.innerHTML=html+'</table></div><p class="muted">Bubble size = today\\'s traded value (close × volume). NIFTY change: '+(p.nifty_change===null||p.nifty_change===undefined?'—':p.nifty_change.toFixed(2)+'%')+'. As of '+p.as_of+'.</p>';
+    html+='<p class="muted">Bubble size = today\\'s traded value (close × volume). NIFTY change: '+(p.nifty_change===null||p.nifty_change===undefined?'—':p.nifty_change.toFixed(2)+'%')+'. As of '+p.as_of+'.</p>';
+    list.innerHTML=html;
   }
   return true;
 }
@@ -655,8 +913,8 @@ function bhanuCandleRender(id, p, refreshUrl){
   }
   var o=bhanuChartOpts(420);o.width=el.clientWidth||900;
   var ch=LightweightCharts.createChart(el,o);
-  var cs=ch.addCandlestickSeries({upColor:'#26a69a',downColor:'#ef5350',
-    wickUpColor:'#26a69a',wickDownColor:'#ef5350',borderVisible:false});
+  var cs=ch.addCandlestickSeries({upColor:'#2f9e5f',downColor:'#d6455d',
+    wickUpColor:'#2f9e5f',wickDownColor:'#d6455d',borderVisible:false});
   cs.setData(p.candles);
   var vw=null;
   if(p.vwap&&p.vwap.length){
@@ -731,6 +989,8 @@ function bhanuQuoteFetch(){
         ce.className='index-change '+(q.change_pct>=0?'up':'down');
       }
       if(ve&&q.prev_close!==null&&q.prev_close!==undefined){ve.textContent='prev close '+Number(q.prev_close).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}
+      var card=document.getElementById('q-'+slug+'-card');
+      if(card&&q.change_pct!==null&&q.change_pct!==undefined){card.classList.toggle('neg',q.change_pct<0);}
     });
     if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
   });
@@ -742,12 +1002,12 @@ function bhanuQuoteRefresh(){
       if(pe){pe.textContent='data unavailable';}
     });
   });
-  // Quotes tick every 5 seconds too — the price on the card moves
+  // Quotes tick every 2 seconds too — the price on the card moves
   // while you watch, it does not wait for the 60-second cycle.
   if(!window.bhanuQuoteTimer){
     window.bhanuQuoteTimer=setInterval(function(){
       bhanuQuoteFetch().catch(function(){});
-    },5000);
+    },2000);
   }
   window.bhanuRefreshers.push(function(){return bhanuQuoteFetch();});
 }
@@ -776,7 +1036,7 @@ function bhanuMCHistHTML(hist){
   var rows='';
   hist.buckets.forEach(function(b){
     var w=Math.max(2,100*b.count/max);
-    var color=b.label.indexOf('Target')===0?'#26a69a':(b.label.indexOf('Stop')===0?'#ef5350':'#2962ff');
+    var color=b.label.indexOf('Target')===0?'#2f9e5f':(b.label.indexOf('Stop')===0?'#d6455d':'#2563eb');
     rows+='<tr><td>'+b.label+'</td><td style="width:55%"><div style="height:18px;border-radius:4px;background:'+color+';width:'+w.toFixed(1)+'%"></div></td><td>'+b.count.toLocaleString('en-IN')+' ('+b.pct.toFixed(1)+'%)</td></tr>';
   });
   var avg='';
@@ -934,7 +1194,16 @@ function bhanuTimemachineLoad(){
     el.innerHTML=d.html;
     if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
     bhanuMCRefresh();
-  }).catch(function(e){el.innerHTML='<p class="muted">Time Machine load nahi ho paya — page refresh karein.</p>';});
+  }).catch(function(e){el.innerHTML='<p class=\"muted\">Time Machine load nahi ho paya — page refresh karein.</p>';});
+}
+function bhanuSkillsLoad(){
+  var el=document.getElementById('skills-table');
+  if(!el){return;}
+  fetch('/api/skills').then(function(r){if(!r.ok){throw new Error('skills '+r.status);}return r.json();}).then(function(d){
+    if(!d||!d.html){throw new Error(d&&d.error?d.error:'no skills data');}
+    el.innerHTML=d.html;
+    if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
+  }).catch(function(e){el.innerHTML='<p class="muted">Skills load nahi ho paye — page refresh karein.</p>';});
 }
 </script>"""
 
@@ -995,8 +1264,8 @@ def _mc_histogram_svg(hist: dict) -> str:
     rows = ""
     for b in buckets:
         w = max(2, 100.0 * b["count"] / max_count)
-        color = "#26a69a" if b["label"].startswith("Target") else (
-            "#ef5350" if b["label"].startswith("Stop") else "#2962ff"
+        color = "#2f9e5f" if b["label"].startswith("Target") else (
+            "#d6455d" if b["label"].startswith("Stop") else "#2563eb"
         )
         rows += (
             f"<tr><td>{_esc(b['label'])}</td>"
@@ -1020,11 +1289,13 @@ def _mc_histogram_svg(hist: dict) -> str:
 
 
 def _index_cards_html() -> str:
-    """Three index cards (NIFTY / BANK NIFTY / SENSEX) with big price
-    + change, filled in lazily by ``bhanuQuoteFetch`` (/api/quotes) —
-    the page renders instantly with a "loading" state; no Yahoo fetch
-    ever blocks a page render. Cell ids: ``q-<slug>-price`` /
-    ``q-<slug>-chg`` / ``q-<slug>-prev``."""
+    """Three index cards (NIFTY / BANK NIFTY / SENSEX) in the reference
+    tile style: 76px tile, sparkline on top, label overlay, price +
+    change in the foot. Filled in lazily by ``bhanuQuoteFetch``
+    (/api/quotes) and the 5s live-line ticks, which also draw each
+    card's sparkline from the same /api/live line. Cell ids:
+    ``q-<slug>-price`` / ``q-<slug>-chg`` / ``q-<slug>-prev`` /
+    ``q-<slug>-spark`` / ``q-<slug>-card``."""
     cards = ""
     for _symbol, label, slug in (
         ("^NSEI", "NIFTY 50", "nsei"),
@@ -1032,10 +1303,12 @@ def _index_cards_html() -> str:
         ("^BSESN", "SENSEX", "bsesn"),
     ):
         cards += (
-            f"<div class='index-card'><div class='index-name'>{_esc(label)}</div>"
-            f"<div class='index-price' id='q-{slug}-price'>loading…</div>"
-            f"<div class='index-change' id='q-{slug}-chg'>—</div>"
-            f"<div class='index-prev' id='q-{slug}-prev'>prev close —</div></div>"
+            f"<div class='icard' id='q-{slug}-card'>"
+            f"<div class='spark' id='q-{slug}-spark'></div>"
+            f"<div class='lab'><b>{_esc(label)}</b></div>"
+            f"<div class='foot'><b id='q-{slug}-price'>loading…</b>"
+            f"<span id='q-{slug}-chg'>—</span>"
+            f"<span class='muted' id='q-{slug}-prev'>prev close —</span></div></div>"
         )
     return f"<div class='index-cards'>{cards}</div>"
 
@@ -1202,25 +1475,43 @@ def home(lang: str) -> str:
         chart_cards += _line_chart_block(cid, label, yahoo_symbol)
         lazy_calls += f"bhanuLazyLine('{cid}', '{yahoo_symbol}');"
 
-    # (b) Smart Money Flow — all stocks' intraday % change on one chart.
+    # (b) Smart Money — all stocks' intraday % change on one spaghetti
+    # chart, waterfall tiles on the right (strongest / weakest).
     flow_html = (
-        "<div class='card'><h3>Smart Money Flow — all stocks, one chart</h3>"
-        "<p class='muted'>Every line is one stock's intraday % change from the open. "
-        "Green = up, red = down, blue = NIFTY. The chart loads after the page "
-        "(it fetches all 39 symbols) — if it fails, it says so honestly.</p>"
-        "<div id='flow-chart' class='chart-box' style='height:340px'></div>"
+        "<div class='card' id='smartmoney'><div class='ml-h'>"
+        "<h3>SMART MONEY</h3>"
+        "<span class='sub'>Every F&O stock and NIFTY, BANKNIFTY, SENSEX: "
+        "displacement, structure, zones and liquidity, live</span>"
+        "<span class='sp'></span>"
+        "<a href='#sectormap'>Sector Map ↓</a>"
+        "<span class='pill'><span class='dot'></span>LIVE</span></div>"
+        "<div class='sm-stage'><div class='sm-spaghetti'>"
+        "<div class='counts' id='flow-chart-counts' style='display:flex;gap:16px'></div>"
+        "<div id='flow-chart' style='height:560px'></div></div>"
+        "<div class='sm-waterfall' id='flow-chart-waterfall'></div></div>"
+        "<p class='note'>Lines: every F&O stock's move since the open "
+        "(green above, red below), NIFTY dashed blue. Waterfall: every "
+        "stock now, strongest at the top, weakest at the bottom. "
+        "Prices 2–3 s behind NSE (indices every 2 s, stocks every 30 s; "
+        "SENSEX ~15 min late). A technical screen, not advice.</p>"
         "<p class='muted' id='flow-chart-legend'></p></div>"
     )
-    # (c) Sector Map bubble chart (lazy, same data as the flow).
+    # (c) Sector Map horizon (lazy, same data as the flow).
     sector_html = (
-        "<div class='card'><h3>Sector Map</h3>"
-        "<p class='muted'>Each bubble is a sector: green = up, red = down, "
-        "size = today's traded value. <a href='/sectors'>Full sector page</a>.</p>"
-        "<div id='sector-map'></div><div id='sector-map-list'></div></div>"
+        "<div class='card' id='sectormap'><div class='ml-h'>"
+        "<h3>SECTOR MAP</h3>"
+        "<span class='sub'>Where the money is going — how each sector moves "
+        "against NIFTY, with size and momentum</span>"
+        "<span class='sp'></span>"
+        "<a href='#smartmoney'>Smart money ↑</a>"
+        "<span class='pill'><span class='dot'></span>LIVE · NSE indices</span></div>"
+        "<div class='hz-wrap'><div id='sector-map'></div>"
+        "<div class='hz-side' id='sector-map-list'></div></div>"
+        "<p class='muted'><a href='/sectors'>Full sector page</a>.</p></div>"
     )
     # (d) News feed (prominent section, bot-checked) — lazy.
     news_html = (
-        f"<div id='news-feed'><div class='card'><h3>{t('news')} — News Feed</h3>"
+        f"<div id='news-feed'><div class='card'><h3>NEWS</h3>"
         f"<p class='loading'>News load ho raha hai…</p></div></div>"
     )
     # (e) ORB hits — lazy (top 10).
@@ -1230,7 +1521,7 @@ def home(lang: str) -> str:
     )
     # (f) Robot status — the live engine, in its own card (lazy).
     robot_html = (
-        "<div class='card' id='robot-status'><h3>Robot — live engine</h3>"
+        "<div id='robot-status'>"
         "<p class='loading'>Robot status load ho raha hai…</p></div>"
     )
     # (g) Levels mini-summary — support/resistance at a glance (lazy).
@@ -1248,8 +1539,8 @@ def home(lang: str) -> str:
         f"{_index_cards_html()}"
         f"{paper_html}"
         f"<p>{t('flat_by')}: 15:15 IST. ORB range 09:15–09:30 IST.</p></div>"
-        f"{chart_cards}{flow_html}{sector_html}{news_html}{orb_html}"
-        f"{robot_html}{levels_mini_html}{tm_mini_html}"
+        f"{chart_cards}{flow_html}{sector_html}{robot_html}{news_html}{orb_html}"
+        f"{levels_mini_html}{tm_mini_html}"
     )
     return _page(
         lang, t("home"), body,
@@ -1259,6 +1550,7 @@ def home(lang: str) -> str:
           f"bhanuQuoteRefresh();bhanuNewsRefresh('{lang}');bhanuOrbHitsFetch();"
           f"bhanuRobotFetch();bhanuLevelsMiniFetch();bhanuTmMiniFetch();{lazy_calls}</script>",
         live=True,
+        active="home",
     )
 
 
@@ -1336,35 +1628,68 @@ def _entry_signal_for(
     )
 
 
+def _rr_bar_html(entry, stop, tp2) -> str:
+    """R:R bar for a trade panel: red risk segment vs green reward
+    segment (TP2 = 2R by construction), with SL / R:R / TP2 labels."""
+    try:
+        risk = abs(float(entry) - float(stop))
+        reward = abs(float(tp2) - float(entry))
+    except (TypeError, ValueError):
+        return ""
+    total = risk + reward
+    if total <= 0:
+        return ""
+    rw = 100.0 * risk / total
+    rr = reward / risk if risk > 0 else 0.0
+    return (
+        f"<div class='rr'><i style='width:{rw:.0f}%;background:#d6455d'></i>"
+        f"<i style='width:{100.0 - rw:.0f}%;background:#2f9e5f'></i></div>"
+        f"<div class='rrl'><span>SL {float(stop):,.2f}</span>"
+        f"<span>R:R 1:{rr:.1f}</span><span>TP2 {float(tp2):,.2f}</span></div>"
+    )
+
+
 def _signal_breakdown_html(sig: dict) -> str:
-    """Signal breakdown card: decision + entry/SL/TP1/TP2/TP3 and every
-    factor's verdict with its reason — so the news, Time Machine and
-    volume contribution to the entry/exit is visible, not hidden."""
+    """Signal breakdown as a trade panel (one entry, one exit): entry /
+    SL / TP1/TP2/TP3, R:R bar, and the five factor verdicts that built
+    it — news, Time Machine (10,000 replays) and volume included."""
     if not sig or sig.get("decision") == "NO SIGNAL":
         return (
-            "<div class='card'><h3>Signal breakdown</h3>"
-            "<p>No ORB signal — no entry to judge.</p></div>"
+            "<div class='tpanel'><div class='tt'><span>SIGNAL</span>"
+            "<span>NO SIGNAL</span></div>"
+            "<div class='st none'><b>NO SIGNAL</b> — no ORB trigger, "
+            "no entry to judge.</div></div>"
         )
 
     def _f(value) -> str:
         return f"{value:,.2f}" if value is not None else "—"
 
-    lines = ""
+    checks = ""
     for key, label in (("orb", "ORB"), ("levels", "Levels"),
                        ("news", "News"), ("mc", "Time Machine"),
                        ("volume", "Volume")):
         factor = (sig.get("factors") or {}).get(key)
         if not factor:
             continue
-        lines += (
-            f"<p><b>{label}: {_esc(factor.get('verdict', ''))}</b> — "
-            f"{_esc(factor.get('reason', ''))}</p>"
+        checks += (
+            f"<div><b>{label} — {_esc(factor.get('verdict', ''))}</b> — "
+            f"{_esc(factor.get('reason', ''))}</div>"
         )
     size_note = ""
     if sig.get("size_factor") == 0.5:
         size_note = " (half size)"
     elif sig.get("size_factor") == 0.0:
         size_note = " (no trade)"
+    decision = _esc(sig.get("decision", ""))
+    st_class = "sig" if decision == "ENTER" else ("warn" if "HALF" in decision else "none")
+    rr_txt = "—"
+    try:
+        risk = abs(float(sig.get("entry")) - float(sig.get("stop")))
+        reward = abs(float(sig.get("tp2")) - float(sig.get("entry")))
+        if risk > 0:
+            rr_txt = f"1:{reward / risk:.1f}"
+    except (TypeError, ValueError):
+        pass
     robot_line = ""
     try:
         st = poller_mod.status()
@@ -1379,14 +1704,21 @@ def _signal_breakdown_html(sig: dict) -> str:
     except Exception:  # noqa: BLE001 - the breakdown never depends on the engine
         robot_line = ""
     return (
-        f"<div class='card'><h3>Signal breakdown — "
-        f"{_esc(sig.get('symbol', ''))} {_esc(sig.get('direction', ''))}</h3>"
-        f"<p><b>Decision: {_esc(sig.get('decision', ''))}{size_note}</b> — "
-        f"{_esc(sig.get('summary', ''))}</p>"
-        f"<p>Entry {_f(sig.get('entry'))} | SL {_f(sig.get('stop'))} | "
-        f"TP1 {_f(sig.get('tp1'))} | TP2 {_f(sig.get('tp2'))} | "
-        f"TP3 {_f(sig.get('tp3'))}</p>"
-        f"{lines}{robot_line}</div>"
+        f"<div class='tpanel'>"
+        f"<div class='tt'><span>SIGNAL — {_esc(sig.get('symbol', ''))} "
+        f"{_esc(sig.get('direction', ''))}</span><span>{decision}</span></div>"
+        f"<div class='tn'>{decision}{size_note} "
+        f"<span class='muted'>{_esc(sig.get('summary', ''))}</span></div>"
+        f"<div class='ts'><div>ENTRY<b>{_f(sig.get('entry'))}</b></div>"
+        f"<div>STOP<b>{_f(sig.get('stop'))}</b></div>"
+        f"<div>R:R<b>{rr_txt}</b></div></div>"
+        f"<div class='tr'><span>TP1 — 1R</span><b>{_f(sig.get('tp1'))}</b></div>"
+        f"<div class='tr'><span>TP2 — 2R</span><b>{_f(sig.get('tp2'))}</b></div>"
+        f"<div class='tr'><span>TP3 — 3R</span><b>{_f(sig.get('tp3'))}</b></div>"
+        f"{_rr_bar_html(sig.get('entry'), sig.get('stop'), sig.get('tp2'))}"
+        f"<div class='chk'>{checks}</div>"
+        f"<div class='st {st_class}'><b>{decision}</b> — "
+        f"{_esc(sig.get('summary', ''))}</div>{robot_line}</div>"
     )
 
 
@@ -1433,6 +1765,7 @@ def orb_page(lang: str, query: dict | None = None) -> str:
         head_extra=_chart_lib_tag(),
         scripts=_chart_js() + f"<script>bhanuOrbLoad('{wanted}');</script>",
         live=True,
+        active="orb",
     )
 
 
@@ -1538,6 +1871,7 @@ def levels_page(lang: str, query: dict | None = None) -> str:
         head_extra=_chart_lib_tag(),
         scripts=_chart_js() + f"<script>bhanuLevelsLoad('{wanted}');</script>",
         live=True,
+        active="levels",
     )
 
 
@@ -1562,21 +1896,15 @@ def sectors_page(lang: str) -> str:
         lang, "Sectors", body,
         scripts=_chart_js() + "<script>bhanuSectorMap('sector-map');</script>",
         live=True,
+        active="sectors",
     )
 
 
 def skills_page(lang: str) -> str:
+    """Skills page — renders INSTANTLY. The live skill statuses
+    (which take ~12 s cold, they fetch live data) load lazily from
+    /api/skills after the page, like every other slow section."""
     t = lambda k: i18n_mod.t(k, lang)
-    try:
-        rows = _cached("skills", 120, lambda: skills_mod.collect_skill_status(live=True))
-    except Exception as exc:  # noqa: BLE001
-        return _page(lang, t("skills"), f"<p>skills unavailable: {_esc(exc)}</p>")
-    body_rows = "".join(
-        f"<tr><td>{_esc(r.get('daytrader', ''))}</td><td>{_esc(r.get('module', ''))}</td>"
-        f"<td>{_esc(r.get('does', ''))}</td><td>{_esc(r.get('shows', ''))}</td>"
-        f"<td>{_esc(r.get('status', ''))}</td></tr>"
-        for r in rows
-    )
     note = (
         "<p class='muted'>All 11 DayTrader skills, in one place. "
         "trader-budget was folded into the sizing calculator (budget is an "
@@ -1587,15 +1915,36 @@ def skills_page(lang: str) -> str:
         "replay (200 runs); the full 10,000-run check is on the CLI.</p>"
     )
     body = (
-        f"<div class='card'><p>{len(rows)} skills — what each does, where it shows, and its live status right now.</p>"
+        f"<div class='card'><div id='skills-table'>"
+        f"<p class='loading'>Skills load ho raha hai…</p></div>{note}</div>"
+        f"{_news_feed_html(lang)}"
+    )
+    return _page(lang, t("skills"), body,
+                 scripts=_chart_js() + "<script>bhanuSkillsLoad();</script>",
+                 active="skills")
+
+
+def _api_skills() -> dict:
+    """Live skill statuses (cached 120 s) — the slow part of /skills,
+    served lazily so the page itself opens instantly."""
+    try:
+        rows = _cached("skills", 120, lambda: skills_mod.collect_skill_status(live=True))
+    except Exception as exc:  # noqa: BLE001
+        return {"html": f"<p>skills unavailable: {_esc(exc)}</p>"}
+    body_rows = "".join(
+        f"<tr><td>{_esc(r.get('daytrader', ''))}</td><td>{_esc(r.get('module', ''))}</td>"
+        f"<td>{_esc(r.get('does', ''))}</td><td>{_esc(r.get('shows', ''))}</td>"
+        f"<td>{_esc(r.get('status', ''))}</td></tr>"
+        for r in rows
+    )
+    return {"html": (
+        f"<p>{len(rows)} skills — what each does, where it shows, and its live status right now.</p>"
         f"<div class='table-wrap'><table>"
         f"<colgroup><col style='width:16%'><col style='width:14%'><col style='width:34%'>"
         f"<col style='width:16%'><col style='width:20%'></colgroup>"
         f"<tr><th>DayTrader skill</th><th>Our module</th><th>What it does</th>"
-        f"<th>Shows on</th><th>Live status</th></tr>{body_rows}</table></div>{note}</div>"
-        f"{_news_feed_html(lang)}"
-    )
-    return _page(lang, t("skills"), body)
+        f"<th>Shows on</th><th>Live status</th></tr>{body_rows}</table></div>"
+    )}
 
 
 def _timemachine_body(data: dict) -> str:
@@ -1726,6 +2075,7 @@ def timemachine_page(lang: str) -> str:
     return _page(
         lang, t("timemachine"), body,
         scripts=_chart_js() + "<script>bhanuTimemachineLoad();</script>", live=True,
+        active="timemachine",
     )
 
 
@@ -1745,6 +2095,7 @@ def chain_page(lang: str, query: dict) -> str:
             f"<p>Option chain unavailable: {_esc(chain['error'])}</p>"
             f"<p><a href='/chain?symbol=NIFTY&lang={lang}'>NIFTY</a> | "
             f"<a href='/chain?symbol=BANKNIFTY&lang={lang}'>BANKNIFTY</a></p>",
+            active="chain",
         )
     summary = options_mod.pcr_summary(chain)
     strikes = chain.get("strikes", [])[:30]
@@ -1765,7 +2116,7 @@ def chain_page(lang: str, query: dict) -> str:
         f"<div class='table-wrap'><table><tr><th>Strike</th><th>CE LTP</th><th>CE OI</th>"
         f"<th>PE LTP</th><th>PE OI</th></tr>{rows}</table></div>"
     )
-    return _page(lang, f"{t('option_chain')} — {symbol}", body)
+    return _page(lang, f"{t('option_chain')} — {symbol}", body, active="chain")
 
 
 def sizing_page(lang: str, query: dict) -> str:
@@ -1800,7 +2151,7 @@ def sizing_page(lang: str, query: dict) -> str:
         "Size = smallest of four limits (max loss / risk, position cap, max order, cash buffer). "
         "If the stop is too far for the max loss, the calculator refuses.</p>"
     )
-    return _page(lang, t("sizing"), form + pre + note)
+    return _page(lang, t("sizing"), form + pre + note, active="sizing")
 
 
 def paper_page(lang: str) -> str:
@@ -1811,7 +2162,7 @@ def paper_page(lang: str) -> str:
         today = datetime.now(IST).date()
         summary = paper_mod.day_summary(today)
     except Exception as exc:  # noqa: BLE001
-        return _page(lang, t("paper_trading"), f"<p>unavailable: {_esc(exc)}</p>")
+        return _page(lang, t("paper_trading"), f"<p>unavailable: {_esc(exc)}</p>", active="paper")
     pos_rows = "".join(
         f"<tr><td>{_esc(p.get('id', ''))}</td><td>{_esc(p.get('symbol', ''))}</td>"
         f"<td>{_esc(p.get('direction', ''))}</td><td>{_esc(p.get('qty', ''))}</td>"
@@ -1871,7 +2222,7 @@ def paper_page(lang: str) -> str:
         f"<h3>Closed trades</h3><div class='table-wrap'><table><tr><th>ID</th><th>Symbol</th><th>Dir</th>"
         f"<th>Exit</th><th>P&amp;L</th><th>Reason</th></tr>{tr_rows or '<tr><td colspan=6>none</td></tr>'}</table></div>"
     )
-    return _page(lang, t("paper_trading"), body)
+    return _page(lang, t("paper_trading"), body, active="paper")
 
 
 def _api_flow() -> dict:
@@ -2131,7 +2482,9 @@ def _api_news(query: dict, lang: str) -> dict:
 
 
 def _robot_html() -> str:
-    """Robot status card — what the live engine is doing right now.
+    """Robot status as a trade panel — the bot's own entry/exit (one
+    entry, one exit) from the fresh scans, plus what the live engine
+    is doing right now.
 
     Every number comes from the engine's in-memory state (instant,
     never a fetch): last scan times, symbols scanned, ORB hits, news
@@ -2147,21 +2500,23 @@ def _robot_html() -> str:
         return stamp[11:19] if len(stamp) >= 19 else (stamp or "—")
 
     market = "OPEN" if st.get("market_open") else "closed (slow polls)"
-    head = (
-        f"<p><b>Robot — live engine</b> · market {market} · "
-        f"{'● LIVE' if st.get('fresh') else 'warming up…'}</p>"
-        f"<p class='muted'>Last scans — indices {_clock(ticks.get('indices', ''))} · "
+    live_badge = ("<span class='pill'><span class='dot'></span>LIVE</span>"
+                  if st.get("fresh") else "<span>warming up…</span>")
+    scans = (
+        f"Last scans — indices {_clock(ticks.get('indices', ''))} · "
         f"spark {_clock(ticks.get('spark', ''))} · intraday "
         f"{_clock(ticks.get('intraday', ''))} · flow "
         f"{_clock(ticks.get('flow', ''))} · news "
         f"{_clock(ticks.get('news', ''))} · scans "
         f"{_clock(ticks.get('scans', ''))} · Time Machine "
-        f"{_clock(ticks.get('timemachine', ''))}</p>"
-        f"<p>{st.get('symbols_scanned', 0)} symbols scanned · "
+        f"{_clock(ticks.get('timemachine', ''))}"
+    )
+    counts = (
+        f"{st.get('symbols_scanned', 0)} symbols scanned · "
         f"{st.get('spark_symbols', 0)} live spark feeds · "
         f"{st.get('orb_hits', 0)} ORB hit(s) now · news checked "
         f"{_clock(st.get('news_checked_at', ''))} · Time Machine "
-        f"{st.get('timemachine_replays', 0):,} replays</p>"
+        f"{st.get('timemachine_replays', 0):,} replays"
     )
     backoff = ""
     if st.get("backoff_until"):
@@ -2201,17 +2556,44 @@ def _robot_html() -> str:
     if picked:
         symbol, direction, entry, stop = picked
         tp1, tp2, tp3 = _tp123(str(direction), float(entry), float(stop))
-        best = (
-            f"<p><b>Best setup now: {_esc(symbol)} {_esc(direction)}</b> — "
-            f"entry {entry:,.2f} · SL {stop:,.2f} · TP1 {tp1:,.2f} · "
-            f"TP2 {tp2:,.2f} · TP3 {tp3:,.2f} "
-            f"(fresh scan {_clock(ticks.get('scans', ''))})</p>"
+        try:
+            risk = abs(float(entry) - float(stop))
+            rr_txt = (f"1:{abs(float(tp2) - float(entry)) / risk:.1f}"
+                      if risk > 0 else "—")
+        except (TypeError, ValueError):
+            rr_txt = "—"
+        panel = (
+            f"<div class='tpanel'>"
+            f"<div class='tt'><span>BOT — BEST SETUP NOW</span>"
+            f"<span>{live_badge}</span></div>"
+            f"<div class='tn'>{_esc(symbol)} {_esc(direction)} "
+            f"<span class='muted'>fresh scan {_clock(ticks.get('scans', ''))}</span></div>"
+            f"<div class='ts'><div>ENTRY<b>{float(entry):,.2f}</b></div>"
+            f"<div>STOP<b>{float(stop):,.2f}</b></div>"
+            f"<div>R:R<b>{rr_txt}</b></div></div>"
+            f"<div class='tr'><span>TP1 — 1R</span><b>{tp1:,.2f}</b></div>"
+            f"<div class='tr'><span>TP2 — 2R</span><b>{tp2:,.2f}</b></div>"
+            f"<div class='tr'><span>TP3 — 3R</span><b>{tp3:,.2f}</b></div>"
+            f"{_rr_bar_html(entry, stop, tp2)}"
+            f"<div class='st sig'><b>SIGNAL</b> — entry {float(entry):,.2f}, "
+            f"exit at SL {float(stop):,.2f} or TP1/TP2/TP3. One entry, one exit.</div>"
+            f"</div>"
         )
     else:
-        best = "<p>No ORB signal right now — robot is watching.</p>"
+        panel = (
+            f"<div class='tpanel'>"
+            f"<div class='tt'><span>BOT — BEST SETUP NOW</span>"
+            f"<span>{live_badge}</span></div>"
+            f"<div class='st none'><b>WATCHING</b> — no ORB signal right now, "
+            f"robot is watching.</div></div>"
+        )
     return (
-        f"<div class='card'><h3>Robot — live engine</h3>{head}{best}"
-        f"{backoff}</div>"
+        f"<div class='card'><div class='ml-h'><h3>BOT</h3>"
+        f"<span class='sub'>news check + 10,000 replays + volume — "
+        f"entry/exit isse banta hai</span><span class='sp'></span>"
+        f"<span class='pill'><span class='dot'></span>LIVE</span></div>"
+        f"<p class='muted'>Market {market} · {counts}</p>"
+        f"{panel}<p class='muted'>{scans}</p>{backoff}</div>"
     )
 
 
@@ -2227,8 +2609,8 @@ def _api_live(query: dict) -> dict:
     """Live tick for one index: latest price + 1-minute closes.
 
     Served from the live engine's spark state (in-memory, instant —
-    the indices spark every 5 s). The browser's line charts call this
-    every 5 s and update the last point in place, so the line moves
+    the indices spark every 2 s). The browser's line charts call this
+    every 2 s and update the last point in place, so the line moves
     while you watch — no page reload, no 60 s wait. When the engine
     has not had a spark tick yet, this says so honestly instead of
     faking a price."""
@@ -2244,7 +2626,12 @@ def _api_live(query: dict) -> dict:
     line = [{"time": int(c["t"]), "value": float(c["c"])}
             for c in closes[-400:]]
     ltp = entry.get("ltp")
-    prev = entry.get("prev")
+    # Same pinned previous close as /api/quotes — never Yahoo's own
+    # chartPreviousClose on its own (it disagreed with NSE on 26 Nov
+    # 2026: 25,349.70 vs 25,819.25 for NIFTY).
+    prev = poller_mod.get_prev_close(symbol)
+    if prev is None:
+        prev = entry.get("prev")
     pct = round((ltp / prev - 1) * 100, 2) if ltp and prev else None
     return {"symbol": symbol, "ltp": ltp, "prev": prev, "change_pct": pct,
             "time": entry.get("time") or 0, "line": line, "error": None}
@@ -2400,6 +2787,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/tmmini":
                 self._send_json(_api_tmmini())
+                return
+            if parsed.path == "/api/skills":
+                self._send_json(_api_skills())
                 return
             if parsed.path.startswith("/static/"):
                 served = _static_file(parsed.path[len("/static/"):])

@@ -64,10 +64,16 @@ SECTORS: dict[str, list[str]] = {
     "Telecom": ["BHARTIARTL"],
 }
 
+#: Symbol -> sector (for the Smart Money spaghetti's left labels).
+_SYMBOL_SECTOR: dict[str, str] = {
+    sym: name for name, members in SECTORS.items() for sym in members
+}
+
 #: Colours used by the pages (kept here so tests can assert on them).
-COLOR_UP = "#26a69a"
-COLOR_DOWN = "#ef5350"
-COLOR_INDEX = "#2962ff"
+#: Reference palette: green #2f9e5f, red #d6455d, blue #2563eb.
+COLOR_UP = "#2f9e5f"
+COLOR_DOWN = "#d6455d"
+COLOR_INDEX = "#2563eb"
 COLOR_VWAP = "#7e57c2"
 COLOR_PDH = "#f59e0b"
 COLOR_PDL = "#8d6e63"
@@ -205,6 +211,7 @@ def flow_series(universe: dict[str, str] | None = None) -> dict[str, Any]:
                 "change_pct": change,
                 "up": change >= 0,
                 "is_index": name in INDICES,
+                "sector": _SYMBOL_SECTOR.get(name, "Index"),
                 "traded_value": traded_value,
             }
         )
@@ -345,8 +352,8 @@ def _overlay_payload(
                 "bottom": fvg["bottom"],
                 "from": fvg["from_time"],
                 "to": None,
-                "color": "rgba(41,98,255,0.12)",
-                "border": "#2962ff",
+                "color": "rgba(37,99,235,0.12)",
+                "border": COLOR_INDEX,
                 "label": fvg["label"],
             }
         )

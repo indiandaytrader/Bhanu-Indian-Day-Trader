@@ -866,8 +866,8 @@ class TestChartPages(unittest.TestCase):
             html = app_mod.home("hi")
             news = app_mod._api_news({}, "hi")
         for needle in ("chart-nifty", "chart-bank", "chart-sensex",
-                       "Smart Money Flow", "flow-chart", "Sector Map", "sector-map",
-                       "News Feed", "ORB Hits", "lightweight-charts"):
+                       "SMART MONEY", "flow-chart", "SECTOR MAP", "sector-map",
+                       "NEWS", "ORB Hits", "lightweight-charts"):
             self.assertIn(needle, html)
         # The headline itself arrives via /api/news after the page loads.
         self.assertIn("Nifty rallies on FII buying", news["html"])
@@ -1263,9 +1263,9 @@ class TestSignalDashboard(unittest.TestCase):
             out = app_mod._api_orbbreakdown({"symbol": ["NIFTY"]}, "en")
             table = app_mod._api_orb({}, "en")
         html = out["html"]
-        for needle in ("Signal breakdown", "TP1", "TP2", "TP3",
+        for needle in ("SIGNAL", "TP1", "TP2", "TP3",
                        "25,757.50", "25,785.00", "25,812.50",
-                       "Volume:", "STRONG", "News:", "Time Machine:"):
+                       "Volume —", "STRONG", "News —", "Time Machine —"):
             self.assertIn(needle, html)
         for needle in ("TP1 / TP2 / TP3", "25,757.50", "25,785.00",
                        "25,812.50"):
@@ -1298,9 +1298,9 @@ class TestSignalDashboard(unittest.TestCase):
             out = app_mod._api_levelsbreakdown({"symbol": ["NIFTY"]}, "en")
             table = app_mod._api_levels({}, "en")
         html = out["html"]
-        for needle in ("Signal breakdown", "TP1", "TP2", "TP3",
+        for needle in ("SIGNAL", "TP1", "TP2", "TP3",
                        "25,757.50", "25,785.00", "25,812.50",
-                       "Volume:", "STRONG", "News:", "Time Machine:"):
+                       "Volume —", "STRONG", "News —", "Time Machine —"):
             self.assertIn(needle, html)
         for needle in ("TP1", "TP2", "TP3",
                        "25,757.50", "25,785.00", "25,812.50"):
@@ -1352,30 +1352,36 @@ class TestLiveRefresh(unittest.TestCase):
                      app_mod.skills_page("en")):
             self.assertNotIn("bhanu-live-indicator", html)
 
-    def test_nav_matches_screenshot(self):
-        """Top nav stays exactly as the screenshot: plain blue
-        underlined links with " | " separators, in this order — never
-        buttons, pills or a dark navbar. Blue + readable in both
-        themes (WCAG AA contrast)."""
+    def test_nav_is_professional_tabs(self):
+        """Top nav is a segmented tab bar (active tab highlighted),
+        in the reference order — never plain blue underlined text
+        links (26 Nov 15:24 — Bhanu: unprofessional, 50 times said).
+        No bare <a> text links, no " | " separators, no underline.
+        Blue + readable in both themes (WCAG AA contrast)."""
         import re
         from web import app as app_mod
         want = ["home", "ORB Scanner", "Levels", "Sectors", "Option Chain",
-                "Sizing", "Paper Trading", "Skills", "Time Machine",
-                "EN", "HI"]
+                "Sizing", "Paper Trading", "Skills", "Time Machine"]
         for lang in ("en", "hi"):
             html = app_mod.home(lang)
-            nav = re.search(r"<nav>(.*?)</nav>", html, re.S).group(1)
+            nav = re.search(r"<nav class='seg'>(.*?)</nav>", html, re.S).group(1)
             labels = re.findall(r"<a[^>]*>([^<]+)</a>", nav)
             self.assertEqual(labels, want)
-            self.assertEqual(nav.count(" | "), 9)
-        page = app_mod._page("en", "x", "")
+            self.assertNotIn(" | ", nav)
+            # The home tab is active on the home page.
+            self.assertIn("<a href='/?lang=" + lang + "' class='on'>", nav)
+            # EN/HI live outside the tab bar, as small pills.
+            self.assertIn("<span class='lang'>", html)
+        page = app_mod._page("en", "x", "", active="orb")
+        self.assertIn("<a href='/orb?lang=en' class='on'>", page)
         css = re.search(r"<style>(.*?)</style>", page, re.S).group(1)
-        self.assertIn("nav a{color:var(--accent)}", css)
-        self.assertIn("--accent:#2962ff", css)   # light theme blue
+        self.assertIn("--accent:#2563eb", css)   # light theme blue
         self.assertIn("--accent:#7aa2ff", css)   # dark theme blue
-        # No button/pill styling on the nav links, and no rule that
-        # would remove their underline.
-        self.assertNotIn("text-decoration:none", css)
+        self.assertIn("nav.seg a{", css)
+        self.assertIn("nav.seg a.on", css)
+        self.assertIn(".ml-top", css)
+        # The old plain-link nav styling is gone.
+        self.assertNotIn("nav a{color:var(--accent)}", css)
 
         def _lum(hexs):
             r, g, b = (int(hexs[i:i + 2], 16) / 255 for i in (1, 3, 5))
@@ -1387,7 +1393,7 @@ class TestLiveRefresh(unittest.TestCase):
             l1, l2 = sorted((_lum(fg), _lum(bg)), reverse=True)
             return (l1 + 0.05) / (l2 + 0.05)
 
-        self.assertGreaterEqual(_contrast("#2962ff", "#f7f8fa"), 4.5)
+        self.assertGreaterEqual(_contrast("#2563eb", "#edf0f3"), 4.5)
         self.assertGreaterEqual(_contrast("#7aa2ff", "#121417"), 4.5)
 
     def test_live_js_handles_hidden_tab_failure_and_retry(self):
@@ -1546,9 +1552,19 @@ class TestTableOverflow(unittest.TestCase):
         with patch.object(options_mod, "fetch_chain", return_value=chain):
             html = app_mod.chain_page("en", {"symbol": ["NIFTY"]})
         self.assertIn("table-wrap", html)
+        # /skills renders instantly now — the table arrives lazily
+        # from /api/skills (cold live fetch used to take ~12 s).
         html = app_mod.skills_page("en")
-        self.assertIn("table-wrap", html)
-        self.assertIn("<colgroup>", html)
+        self.assertIn("skills-table", html)
+        self.assertIn("bhanuSkillsLoad", html)
+        self.assertNotIn("<colgroup>", html)
+        with patch.object(skills_mod, "collect_skill_status",
+                          return_value=[{"daytrader": "orb", "module": "m",
+                                         "does": "d", "shows": "s",
+                                         "status": "ok"}]):
+            out = app_mod._api_skills()
+        self.assertIn("table-wrap", out["html"])
+        self.assertIn("<colgroup>", out["html"])
 
     def test_sector_and_mc_tables_wrapped_in_chart_js(self):
         from web import app as app_mod
@@ -1904,10 +1920,11 @@ class TestPoller(unittest.TestCase):
                          set(_data.UNIVERSE.values()))
 
     def test_live_cadence_is_seconds_not_minutes(self):
-        # The live quote feed must tick every few seconds, never on a
+        # The live quote feed must tick every 2 seconds, never on a
         # 60-second cycle — that is the whole point of real-time.
-        self.assertEqual(poller_mod.POLL_SPARK_FAST_S, 5)
-        self.assertEqual(poller_mod.POLL_SPARK_FULL_FAST_S, 60)
+        # (26 Nov 15:21 — Bhanu: 5 s wait is not trading.)
+        self.assertEqual(poller_mod.POLL_SPARK_FAST_S, 2)
+        self.assertEqual(poller_mod.POLL_SPARK_FULL_FAST_S, 30)
 
     def test_get_spark_reader(self):
         poller_mod.STATE["spark"]["^NSEI"] = {
@@ -1945,8 +1962,96 @@ class TestPoller(unittest.TestCase):
         quotes = poller_mod.get_quotes()
         nifty = next(q for q in quotes if q["symbol"] == "^NSEI")
         self.assertEqual(nifty["price"], 25100.0)
-        self.assertAlmostEqual(nifty["change_pct"], 0.8, places=2)
+        # Price takes the fresh spark ltp, but the previous close is
+        # pinned to NSE (25683.85) — never Yahoo's 24900.0 — so the %
+        # is always vs the same base.
+        self.assertEqual(nifty["prev_close"], 25683.85)
+        self.assertAlmostEqual(nifty["change_pct"], -2.27, places=2)
         self.assertIsNone(nifty["error"])
+
+    def test_get_quotes_prev_close_never_flips(self):
+        # Regression (26 Nov 2026, Bhanu's PC): NIFTY prev close
+        # flipped between NSE 25,819.25 and Yahoo 25,349.70 every
+        # time the spark went fresh/stale, and % change recomputed
+        # against whichever base was live. The pin must hold one
+        # value across fresh/stale alternation.
+        # (Prev pins are per-day and persist in STATE: clear them so
+        # this test starts hermetic — an earlier test class may have
+        # left a Yahoo fallback pin behind.)
+        poller_mod.STATE["prev_pinned"] = {}
+        import time as _time
+        payload = {"data": [
+            {"index": "NIFTY 50", "last": 25900.0, "percentChange": 0.31,
+             "variation": 80.75, "previousClose": 25819.25, "open": 25850.0},
+            {"index": "NIFTY BANK", "last": 63600.0, "percentChange": -0.16,
+             "variation": -103.25, "previousClose": 63703.25,
+             "open": 63650.0},
+        ]}
+        poller_mod.STATE["indices"] = poller_mod.parse_all_indices(payload)
+        for i in range(6):
+            fresh = (i % 2 == 0)
+            poller_mod.STATE["spark"] = {
+                "^NSEI": {"ltp": 25900.0 + i, "prev": 25349.70,
+                          "time": int(_time.time()) if fresh
+                          else int(_time.time()) - 600, "closes": []},
+                "^NSEBANK": {"ltp": 63600.0 - i, "prev": 62585.40,
+                             "time": int(_time.time()) if fresh
+                             else int(_time.time()) - 600, "closes": []},
+            }
+            quotes = poller_mod.get_quotes()
+            nifty = next(q for q in quotes if q["symbol"] == "^NSEI")
+            bank = next(q for q in quotes if q["symbol"] == "^NSEBANK")
+            self.assertEqual(nifty["prev_close"], 25819.25)
+            self.assertEqual(bank["prev_close"], 63703.25)
+            # % always vs the pinned base, never vs Yahoo's prev.
+            self.assertAlmostEqual(
+                nifty["change_pct"],
+                round((nifty["price"] / 25819.25 - 1) * 100, 2), places=2)
+            self.assertAlmostEqual(
+                bank["change_pct"],
+                round((bank["price"] / 63703.25 - 1) * 100, 2), places=2)
+
+    def test_get_quotes_prev_close_upgrades_yahoo_to_nse_once(self):
+        # Engine starts on Yahoo only (NSE not in yet): prev is the
+        # Yahoo fallback. The moment NSE data arrives the pin upgrades
+        # to NSE — once — and never flips back to Yahoo afterwards.
+        import time as _time
+        poller_mod.STATE["prev_pinned"] = {}
+        poller_mod.STATE["indices"] = {}
+        poller_mod.STATE["spark"] = {
+            "^NSEI": {"ltp": 25900.0, "prev": 25349.70,
+                      "time": int(_time.time()), "closes": []}}
+        first = next(q for q in poller_mod.get_quotes()
+                     if q["symbol"] == "^NSEI")
+        self.assertEqual(first["prev_close"], 25349.70)
+        poller_mod.STATE["indices"] = poller_mod.parse_all_indices(
+            {"data": [{"index": "NIFTY 50", "last": 25900.0,
+                       "percentChange": 0.31, "variation": 80.75,
+                       "previousClose": 25819.25, "open": 25850.0}]})
+        second = next(q for q in poller_mod.get_quotes()
+                      if q["symbol"] == "^NSEI")
+        self.assertEqual(second["prev_close"], 25819.25)
+        third = next(q for q in poller_mod.get_quotes()
+                     if q["symbol"] == "^NSEI")
+        self.assertEqual(third["prev_close"], 25819.25)
+
+    def test_get_quotes_prev_close_stays_when_nse_drops(self):
+        # NSE fetch failing later must not hand the pin back to Yahoo:
+        # the last good NSE prev stays until the trading day changes.
+        import time as _time
+        poller_mod.STATE["prev_pinned"] = {}
+        poller_mod.STATE["indices"] = poller_mod.parse_all_indices(
+            self._indices_payload())
+        poller_mod.STATE["spark"] = {
+            "^NSEI": {"ltp": 25100.0, "prev": 24900.0,
+                      "time": int(_time.time()), "closes": []}}
+        first = next(q for q in poller_mod.get_quotes()
+                     if q["symbol"] == "^NSEI")
+        self.assertEqual(first["prev_close"], 25683.85)
+        poller_mod.STATE["indices"] = {}
+        second = next(q for q in poller_mod.get_quotes()
+                      if q["symbol"] == "^NSEI")
+        self.assertEqual(second["prev_close"], 25683.85)
 
     def test_get_quotes_stale_spark_ignored(self):
         import time as _time
@@ -2078,7 +2183,7 @@ class TestRebrand(unittest.TestCase):
     def test_api_robot_warming_up_when_engine_off(self):
         from web import app as app_mod
         out = app_mod._api_robot()
-        self.assertIn("Robot", out["html"])
+        self.assertIn("BOT", out["html"])
         self.assertIn("warming up", out["html"])
 
     def test_levels_mini_stays_in_its_box(self):
@@ -2097,7 +2202,7 @@ class TestRebrand(unittest.TestCase):
 
 
 class TestLiveRealtime(unittest.TestCase):
-    """Real-time, not refresh: quotes and index charts tick every 5 s
+    """Real-time, not refresh: quotes and index charts tick every 2 s
     and update in place. The 60-second cycle is only for slow sections
     (flow, sectors, news, ORB) whose data changes that slowly."""
 
@@ -2133,25 +2238,268 @@ class TestLiveRealtime(unittest.TestCase):
         self.assertIsNone(out["ltp"])
         self.assertIn("unknown symbol", out["error"])
 
+    def test_api_live_uses_pinned_prev_close(self):
+        # /api/live must report the same pinned previous close as
+        # /api/quotes (NSE 25,819.25), never Yahoo's own 25,349.70 —
+        # even though the spark entry itself carries Yahoo's value.
+        import copy
+        import time as _time
+        from bhanu import poller as poller_mod
+        saved_indices = copy.deepcopy(poller_mod.STATE["indices"])
+        saved_spark = copy.deepcopy(poller_mod.STATE["spark"])
+        saved_pinned = copy.deepcopy(poller_mod.STATE["prev_pinned"])
+        try:
+            poller_mod.STATE["indices"] = poller_mod.parse_all_indices(
+                {"data": [{"index": "NIFTY 50", "last": 25900.0,
+                           "percentChange": 0.31, "variation": 80.75,
+                           "previousClose": 25819.25, "open": 25850.0}]})
+            poller_mod.STATE["spark"]["^NSEI"] = {
+                "ltp": 25900.0, "prev": 25349.70,
+                "time": int(_time.time()),
+                "closes": [{"t": int(_time.time()), "c": 25900.0}]}
+            from web import app as app_mod
+            out = app_mod._api_live({"symbol": ["^NSEI"]})
+            self.assertEqual(out["prev"], 25819.25)
+            self.assertAlmostEqual(
+                out["change_pct"],
+                round((25900.0 / 25819.25 - 1) * 100, 2), places=2)
+        finally:
+            poller_mod.STATE["indices"] = saved_indices
+            poller_mod.STATE["spark"] = saved_spark
+            poller_mod.STATE["prev_pinned"] = saved_pinned
+
     def test_line_charts_tick_live_not_on_60s_cycle(self):
         from web import app as app_mod
         js = app_mod._chart_js()
-        # 5-second live tick machinery exists…
+        # 2-second live tick machinery exists…
         self.assertIn("bhanuLiveLineTick", js)
         self.assertIn("bhanuStartLiveLine", js)
-        self.assertIn("setInterval(run,5000)", js)
+        self.assertIn("setInterval(run,2000)", js)
         self.assertIn("/api/live?symbol=", js)
         # …and the old 60-second full re-fetch of the line is gone.
         self.assertNotIn("fetchLine", js)
-        # Quotes tick every 5 s too.
+        # Quotes tick every 2 s too.
         self.assertIn("setInterval(function(){\n      bhanuQuoteFetch()",
                       js)
 
     def test_live_indicator_promises_seconds(self):
         from web import app as app_mod
         html = app_mod.home("en")
-        self.assertIn("tick every few seconds", html)
+        self.assertIn("tick every 2 seconds", html)
         self.assertNotIn("Charts refresh every 60 seconds", html)
+
+    def test_live_clock_ticks_every_second(self):
+        from web import app as app_mod
+        js = app_mod._live_js()
+        self.assertIn("bhanuLiveClock", js)
+        self.assertIn("setInterval(bhanuLiveClock, 1000)", js)
+        # The clock shows the current time plus when data last
+        # arrived — it never pretends a tick happened.
+        self.assertIn("data-last", js)
+        self.assertIn("data ", js)
+
+
+class TestMarketLabLook(unittest.TestCase):
+    """Same-to-same restyle markers: the reference look (palette,
+    fonts, disclaimer, pill nav, LIVE dot, icard tiles, spaghetti +
+    waterfall, horizon sector map, trade panels) — without ever
+    naming the reference product in the repo."""
+
+    def test_disclaimer_strip_and_fonts(self):
+        from web import app as app_mod
+        page = app_mod._page("en", "x", "")
+        self.assertIn('id="ml-disc"', page)
+        self.assertIn("Paper trading only", page)
+        self.assertIn("not investment advice", page)
+        self.assertIn("Barlow+Condensed", page)
+        self.assertIn("family=Inter", page)
+        self.assertIn("JetBrains+Mono", page)
+
+    def test_palette_vars(self):
+        import re
+        from web import app as app_mod
+        css = re.search(r"<style>(.*?)</style>",
+                        app_mod._page("en", "x", ""), re.S).group(1)
+        for var in ("--bg:#edf0f3", "--accent:#2563eb", "--up:#2f9e5f",
+                    "--down:#d6455d", "--upbg:#e7f5ec", "--downbg:#fbe9ec",
+                    "--upmid:#9fd8b5", "--downmid:#f0a9b5",
+                    "--gold:#b7791f"):
+            self.assertIn(var, css)
+        for cls in (".tpanel", ".icard", ".tile", ".sm-stage",
+                    ".sm-waterfall", ".hz-wrap", ".row", ".niftysep",
+                    ".badge", ".pill", ".dot", ".ml-h", ".seg",
+                    ".ml-top", "nav.seg"):
+            self.assertIn(cls, css)
+
+    def test_home_sections_in_reference_order(self):
+        from web import app as app_mod
+        html = app_mod.home("en")
+        order = ["SMART MONEY", "SECTOR MAP", "robot-status", "NEWS",
+                 "ORB Hits", "Levels — indices", "Time Machine — today"]
+        idx = [html.index(marker) for marker in order]
+        self.assertEqual(idx, sorted(idx))
+        for marker in ("flow-chart-counts", "flow-chart-waterfall",
+                       "sector-map-list", "hz-wrap", "sm-stage",
+                       "Sector Map ↓", "Smart money ↑", "LIVE · NSE indices"):
+            self.assertIn(marker, html)
+
+    def test_index_tiles_have_sparklines(self):
+        from web import app as app_mod
+        html = app_mod.home("en")
+        for slug in ("nsei", "nsebank", "bsesn"):
+            self.assertIn(f"q-{slug}-card", html)
+            self.assertIn(f"q-{slug}-spark", html)
+            self.assertIn(f"q-{slug}-price", html)
+            self.assertIn(f"q-{slug}-prev", html)
+        js = app_mod._chart_js()
+        self.assertIn("bhanuSpark(", js)
+        self.assertIn("bhanuSparkFor(", js)
+
+    def test_live_dot_not_bullet(self):
+        from web import app as app_mod
+        html = app_mod.home("en")
+        self.assertIn("<span class='dot'></span> LIVE · last update", html)
+        self.assertNotIn("● LIVE", html)
+        js = app_mod._chart_js()
+        self.assertIn("mlpulse", app_mod._page("en", "x", ""))
+        self.assertIn('class="dot"', app_mod._live_js())
+
+    def test_flow_is_spaghetti_svg_not_line_chart(self):
+        from web import app as app_mod
+        js = app_mod._chart_js()
+        # Dashed blue NIFTY, thin green/red lines, sector labels.
+        self.assertIn('stroke-dasharray="6 4"', js)
+        self.assertIn("bhanuWaterfall(", js)
+        self.assertIn("STRONGEST", js)
+        self.assertIn("WEAKEST", js)
+        # The old Lightweight flow chart (39 line series) is gone —
+        # the spaghetti is hand-drawn SVG now.
+        self.assertNotIn("window.bhanuFlow", js)
+
+    def test_sector_map_is_horizon_with_running_badges(self):
+        from web import app as app_mod
+        js = app_mod._chart_js()
+        self.assertIn("RUNNING", js)
+        self.assertIn("Themes beating NIFTY", js)
+        self.assertIn("niftysep", js)
+        self.assertIn("TECH & MEDIA", js)
+        self.assertIn("FINANCIALS", js)
+
+    def test_robot_is_trade_panel(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        from bhanu import poller as poller_mod
+        with patch.object(
+                poller_mod, "get_levels",
+                return_value={"levels": [
+                    {"symbol": "NIFTY", "signal": "long",
+                     "entry": 25730.0, "stop": 25702.5}]}):
+            html = app_mod._robot_html()
+        for needle in ("tpanel", "BOT — BEST SETUP NOW", "ENTRY", "STOP",
+                       "R:R", "TP1 — 1R", "TP2 — 2R", "TP3 — 3R",
+                       "25,730.00", "25,702.50", "25,757.50"):
+            self.assertIn(needle, html)
+        self.assertIn("class='rr'", html)
+
+    def test_signal_breakdown_is_trade_panel(self):
+        from web import app as app_mod
+        sig = {"decision": "ENTER", "symbol": "NIFTY", "direction": "long",
+               "summary": "ORB trigger, all factors agree",
+               "entry": 25730.0, "stop": 25702.5,
+               "tp1": 25757.5, "tp2": 25785.0, "tp3": 25812.5,
+               "size_factor": 1.0,
+               "factors": {
+                   "orb": {"verdict": "TRIGGER", "reason": "close above range"},
+                   "levels": {"verdict": "SUPPORT", "reason": "above support"},
+                   "news": {"verdict": "SUPPORT", "reason": "no bad news"},
+                   "mc": {"verdict": "ALLOW", "reason": "target hit 40%"},
+                   "volume": {"verdict": "STRONG", "reason": "1.8x average"}}}
+        html = app_mod._signal_breakdown_html(sig)
+        for needle in ("tpanel", "SIGNAL — NIFTY long", "ENTRY", "STOP",
+                       "R:R", "TP1 — 1R", "TP2 — 2R", "TP3 — 3R",
+                       "News — SUPPORT", "Time Machine — ALLOW",
+                       "Volume — STRONG", "class='rr'"):
+            self.assertIn(needle, html)
+
+    def test_home_renders_fast(self):
+        import time
+        from web import app as app_mod
+        start = time.monotonic()
+        app_mod.home("en")
+        self.assertLess(time.monotonic() - start, 0.5)
+
+
+class TestSmoothCharts(unittest.TestCase):
+    """Smooth, continuous charts (26 Nov 15:23): the line glides from
+    the old price to the new one on every 2 s tick — it never stops
+    and then jumps. The last point updates in place (series.update /
+    SVG attribute), the whole series is re-set only on the 5-minute
+    rebase, and the header price glides along with the animation."""
+
+    def test_tick_glides_last_point_in_place(self):
+        from web import app as app_mod
+        js = app_mod._chart_js()
+        # Tween machinery exists.
+        self.assertIn("bhanuAnimLast", js)
+        self.assertIn("bhanuEase", js)
+        self.assertIn("requestAnimationFrame", js)
+        self.assertIn("bhanuSvgLineLast", js)
+        # The tick uses the tween…
+        tick = js[js.index("function bhanuLiveLineTick"):
+                  js.index("function bhanuStartLiveLine")]
+        self.assertIn("bhanuAnimLast(", tick)
+        # …and never re-sets the whole series or rebuilds the SVG.
+        self.assertNotIn("setData(", tick)
+        self.assertNotIn("bhanuSvgLine(st.el", tick)
+
+    def test_svg_keeps_in_place_handles(self):
+        from web import app as app_mod
+        js = app_mod._chart_js()
+        self.assertIn("el._bhanuPath", js)
+        self.assertIn("setAttribute('d',d)", js)
+        self.assertIn("setAttribute('cy'", js)
+
+    def test_svg_last_point_clamps_inside_canvas(self):
+        # A tick outside the initial min/max pins the dot to the
+        # chart edge instead of flying off the canvas (cy < 0 or
+        # cy > height) until the 5-minute rebase re-scales.
+        from web import app as app_mod
+        js = app_mod._chart_js()
+        self.assertIn("Yc(val)", js)
+        self.assertIn("Math.max(pad,Math.min(H-pad,y))", js)
+        self.assertIn("el._bhanuPad", js)
+
+    def test_tick_cadence_is_two_seconds(self):
+        from web import app as app_mod
+        js = app_mod._chart_js()
+        self.assertIn("setInterval(run,2000)", js)
+        # Rebase still every ~5 minutes (150 ticks at 2 s), not 60.
+        self.assertIn("ticks%150===0", js)
+        self.assertNotIn("ticks%60===0", js)
+
+    def test_pages_render_instantly(self):
+        # Every page must open in 2–3 s like the reference: the page
+        # shell renders from local data only; slow sections load
+        # lazily afterwards. Time the renders (cold cache).
+        import time
+        from unittest.mock import patch
+        from web import app as app_mod
+        from bhanu import options as options_mod
+        with patch.object(options_mod, "fetch_chain",
+                          return_value={"strikes": []}):
+            for fn in (lambda: app_mod.home("en"),
+                       lambda: app_mod.orb_page("en", {"symbol": ["NIFTY"]}),
+                       lambda: app_mod.levels_page("en", {"symbol": ["NIFTY"]}),
+                       lambda: app_mod.sectors_page("en"),
+                       lambda: app_mod.chain_page("en", {"symbol": ["NIFTY"]}),
+                       lambda: app_mod.sizing_page("en", {}),
+                       lambda: app_mod.paper_page("en"),
+                       lambda: app_mod.skills_page("en"),
+                       lambda: app_mod.timemachine_page("en")):
+                start = time.monotonic()
+                fn()
+                self.assertLess(time.monotonic() - start, 2.0,
+                                "page render took over 2 s")
 
 
 if __name__ == "__main__":

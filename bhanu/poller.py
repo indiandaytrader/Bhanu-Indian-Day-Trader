@@ -9,8 +9,8 @@ on-demand fetchers only when the engine has nothing yet):
       market is open (5 min when closed): last, % change, prev close,
       open, PE, advances/declines.
     * spark — Yahoo's batch feed, 20 symbols per call: the 3 indices
-      every 5 s (the live quote feed — a new price every few seconds),
-      all 39 symbols every 60 s (flow/sector input).
+      every 2 s (the live quote feed — a new price every couple of
+      seconds), all 39 symbols every 30 s (flow/sector input).
     * intraday — 5-minute candles + close line for the 3 indices every
       60 s, so the home charts draw instantly from warm data.
     * flow / sectors — all 39 symbols' intraday % change every 5 min.
@@ -52,10 +52,10 @@ SNAPSHOT_PATH = REPO_ROOT / "data" / "poller_snapshot.json"
 # --- Cadence (seconds): fast while the market is open, slow otherwise. ---
 POLL_INDICES_FAST_S = 15
 POLL_INDICES_SLOW_S = 300
-POLL_SPARK_FAST_S = 5
+POLL_SPARK_FAST_S = 2
 POLL_SPARK_SLOW_S = 300
 #: Full-universe spark (all 39 symbols) — flow/sector input.
-POLL_SPARK_FULL_FAST_S = 60
+POLL_SPARK_FULL_FAST_S = 30
 POLL_SPARK_FULL_SLOW_S = 300
 POLL_INTRADAY_FAST_S = 60
 POLL_INTRADAY_SLOW_S = 300
@@ -137,6 +137,10 @@ def _fresh_state() -> dict:
         "snapshot_at": "",
         "errors": 0,
         "slow_until": 0.0,
+        # Pinned previous close per index: {name: {"value", "source",
+        # "date"}}. NSE first, Yahoo only as fallback — set by
+        # get_quotes(), never by the fetch threads.
+        "prev_pinned": {},
     }
 
 
@@ -569,12 +573,66 @@ def is_running() -> bool:
 # Readers — what the dashboard serves (copies, never the live dicts)
 # ---------------------------------------------------------------------------
 
+def _pin_prevs(indices: dict, spark: dict) -> dict:
+    """Pin each index's previous close to ONE source per trading day
+    (lock must be held). NSE's ``previousClose`` first, Yahoo's
+    ``chartPreviousClose`` only when NSE has none. A Yahoo fallback
+    upgrades to NSE the moment NSE data arrives; an NSE pin is never
+    replaced by Yahoo — the two sources disagreed on 26 Nov 2026
+    (NIFTY NSE 25,819.25 vs Yahoo 25,349.70) and alternating between
+    them made % change jump between two bases."""
+    pinned = STATE.setdefault("prev_pinned", {})
+    today = _now_ist().date().isoformat()
+    for name in ("NIFTY", "BANKNIFTY", "SENSEX"):
+        yahoo = INDEX_YAHOO[name]
+        nse_prev = indices.get(name, {}).get("prev")
+        yahoo_prev = spark.get(yahoo, {}).get("prev")
+        pin = pinned.get(name)
+        if pin is None or pin.get("date") != today:
+            if nse_prev is not None:
+                pin = {"value": float(nse_prev), "source": "nse",
+                       "date": today}
+            elif yahoo_prev is not None:
+                pin = {"value": float(yahoo_prev), "source": "yahoo",
+                       "date": today}
+            else:
+                pin = None
+            if pin is not None:
+                pinned[name] = pin
+        elif pin.get("source") == "yahoo" and nse_prev is not None:
+            # One-time upgrade, Yahoo fallback -> NSE. Never the
+            # reverse direction, and never back again.
+            pin = {"value": float(nse_prev), "source": "nse",
+                   "date": today}
+            pinned[name] = pin
+    return dict(pinned)
+
+
+def get_prev_close(yahoo_symbol: str) -> float | None:
+    """Pinned previous close for one index (same rule as
+    :func:`get_quotes`), so every endpoint reports the same base."""
+    name = next((k for k, v in INDEX_YAHOO.items()
+                 if v == yahoo_symbol), None)
+    if name is None:
+        return None
+    with _LOCK:
+        pinned = _pin_prevs(dict(STATE["indices"]), dict(STATE["spark"]))
+    pin = pinned.get(name)
+    return pin["value"] if pin else None
+
+
 def get_quotes() -> list[dict] | None:
     """Live index quotes: NSE first, fresh Yahoo spark overrides the
-    last price. Returns None when the engine has nothing yet."""
+    last price. Returns None when the engine has nothing yet.
+
+    The previous close is pinned to ONE source per trading day — see
+    :func:`_pin_prevs`. The price itself still takes the fresh spark
+    ltp (5 s ticks); % change is always recomputed from that price
+    and the pinned previous close, so the three numbers always agree."""
     with _LOCK:
         indices = dict(STATE["indices"])
         spark = dict(STATE["spark"])
+        pinned = _pin_prevs(indices, spark)
     if not indices and not spark:
         return None
     out: list[dict] = []
@@ -583,21 +641,22 @@ def get_quotes() -> list[dict] | None:
         yahoo = INDEX_YAHOO[name]
         ix = indices.get(name, {})
         price = ix.get("last")
-        prev = ix.get("prev")
-        pct = ix.get("pct")
+        pin = pinned.get(name)
+        prev = pin["value"] if pin else None
         sp = spark.get(yahoo, {})
         ltp = sp.get("ltp")
-        sprev = sp.get("prev")
-        if (ltp is not None and sprev
-                and (now - (sp.get("time") or 0)) < SPARK_FRESH_S):
-            price, prev = ltp, sprev
-            pct = round((ltp / sprev - 1) * 100, 2)
-        elif price is None and ltp is not None:
-            # No NSE quote at all (SENSEX is a BSE index, so NSE never
-            # lists it) and Yahoo's BSE feed runs ~15 min stale: the
-            # last good spark value still beats an empty card.
-            price, prev = ltp, sprev
-            pct = round((ltp / sprev - 1) * 100, 2) if sprev else None
+        fresh = (ltp is not None
+                 and (now - (sp.get("time") or 0)) < SPARK_FRESH_S)
+        if fresh or price is None:
+            # Fresh spark ltp is the live price; when NSE has no
+            # quote at all (SENSEX) the last spark value still beats
+            # an empty card.
+            if ltp is not None:
+                price = ltp
+        if price is not None and prev:
+            pct = round((price / prev - 1) * 100, 2)
+        else:
+            pct = None
         if price is None:
             out.append({"symbol": yahoo, "label": INDEX_LABELS[name],
                         "price": None, "prev_close": prev,
