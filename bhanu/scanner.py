@@ -34,6 +34,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -47,6 +48,12 @@ from bhanu.data import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WATCHLIST_PATH = REPO_ROOT / "data" / "watchlist.json"
+
+# datetime.now() needs a real tzinfo object. bhanu.data.IST is the plain
+# string "Asia/Kolkata" (fine for pandas) — passing it to datetime.now()
+# raises TypeError and the whole ORB scan dies silently in the poller,
+# leaving /api/orb stuck on "scan warming up" forever.
+_IST_TZ = ZoneInfo("Asia/Kolkata")
 
 ORB_RANGE_START = "09:15"
 ORB_RANGE_END = "09:30"  # range bars are 09:15, 09:20, 09:25 (5m bars)
@@ -244,7 +251,7 @@ def scan_orb(universe: dict[str, str] | None = None) -> dict[str, Any]:
             failed.append({"symbol": name, "reason": str(exc)})
             continue
         if not bars.empty:
-            cutoff = datetime.now(IST) - timedelta(minutes=5)
+            cutoff = datetime.now(_IST_TZ) - timedelta(minutes=5)
             local_index = bars.index if bars.index.tz is not None else bars.index.tz_localize(IST)
             bars = bars[local_index <= cutoff]
         if bars.empty:
