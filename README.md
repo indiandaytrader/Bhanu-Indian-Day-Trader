@@ -99,13 +99,22 @@ Then open http://localhost:8810.
 .venv/bin/python -m bhanu.levels             # live support/resistance + ORB entry/exit
 .venv/bin/python -m bhanu.skills             # all 11 skills — live status
 .venv/bin/python -m bhanu.timecheck          # time machine + trade check + backtest
+.venv/bin/python -m bhanu.charts             # chart data (candles, flow, sectors)
+.venv/bin/python -m bhanu.structure          # VWAP, swings, CHoCH/BOS, order blocks, FVG
 ```
 
 ## Dashboard pages
 
-- **/levels — Live Support / Resistance** — Nifty / Bank Nifty / Sensex ke live levels: nearest support/resistance (recent swing highs/lows, PDH/PDL aur ORB range se), ORB entry, SL (range midpoint + 1.5x ATR), TP (2R) aur signal — kahan se entry, kahan se exit, sab ek jagah. Levels Yahoo 5m bars se aate hain (public, delayed, proxy) — live platform par verify karo. NSE option chain aksar blocked rehta hai (HTTP 403); chain data kabhi fake nahi kiya jata.
-- **/skills — All 11 skills, ek jagah** — har DayTrader skill: kya karta hai, kahan dikhta hai, aur uska LIVE status abhi (ORB hits, taaze news headlines, entry/SL/TP, Monte Carlo summary, risk gate, paper trades, alerts, NSE filings). trader-budget sizing me folded hai, trader-pelosi skipped hai — dono saaf likhe hain, chhupaye nahi.
-- **/timemachine — Time Machine + Trade Check + Backtest** — aaj ke best ORB setup ko 10,000 baar replay karke win rate / avg R / best case / worst case; usi setup par risk gate (PASS/BLOCK), chaar limits se position size, kitni positions ban sakti hain, SL/TP aur R:R; aur NIFTY ORB backtest (fires, wins, losses, avg R). Koi accuracy % claim nahi — Monte Carlo reality check hai, edge ka proof nahi.
+Charts upar, tables neeche — koi page sirf tables ka nahi. Charts TradingView Lightweight Charts (CDN) se bante hain; data page me JSON ke roop me hota hai. CDN ya data na mile to page honestly "chart unavailable" dikhata hai — fake chart kabhi nahi.
+
+- **/ — Home** — (a) index quotes + NIFTY / BANKNIFTY / SENSEX intraday line charts, (b) Smart Money Flow chart — saare 39 symbols ki intraday % change lines ek hi chart par (green = up, red = down, blue = NIFTY), (c) Sector Map bubble chart, (d) News Feed — bot khud check karke dikhata hai (source + time ke saath), (e) ORB hits table.
+- **/orb — ORB Scanner + candlestick chart** — top hit ka candlestick chart: VWAP line, swing highs/lows markers, CHoCH/BOS labels, order-block aur fair-value-gap boxes, entry/SL/TP boxes (green target, red stop), PDH/PDL aur ORB range lines. Symbol switcher se kisi bhi hit ka chart dekho.
+- **/levels — Live Support / Resistance + candlestick chart** — wahi overlays, index ke live levels ke saath: nearest support/resistance (recent swing highs/lows, PDH/PDL aur ORB range se), ORB entry, SL (range midpoint + 1.5x ATR), TP (2R) aur signal — kahan se entry, kahan se exit, sab ek jagah. Levels Yahoo 5m bars se aate hain (public, delayed, proxy) — live platform par verify karo. NSE option chain aksar blocked rehta hai (HTTP 403); chain data kabhi fake nahi kiya jata.
+- **/sectors — Sector Map** — har sector ek bubble: green = up, red = down, size = aaj ka traded value (close × volume), x = sector vs NIFTY, y = sector % change. Saath me "All sectors" bar list (sector + % change). Sector % change = members ki intraday % change ka equal-weighted mean.
+- **/skills — All 11 skills, ek jagah** — har DayTrader skill: kya karta hai, kahan dikhta hai, aur uska LIVE status abhi (ORB hits, taaze news headlines, entry/SL/TP, Monte Carlo summary, risk gate, paper trades, alerts, NSE filings). trader-budget sizing me folded hai, trader-pelosi skipped hai — dono saaf likhe hain, chhupaye nahi. Neeche News Feed section bhi hai.
+- **/timemachine — Time Machine + Trade Check + Backtest** — upar Monte Carlo distribution chart (10,000 replays kaise bate: target pehle / stop pehle / neither, avg R ke saath), neeche numbers: aaj ke best ORB setup ko 10,000 baar replay karke win rate / avg R / best case / worst case; usi setup par risk gate (PASS/BLOCK), chaar limits se position size, kitni positions ban sakti hain, SL/TP aur R:R; aur NIFTY ORB backtest (fires, wins, losses, avg R). Koi accuracy % claim nahi — Monte Carlo reality check hai, edge ka proof nahi.
+
+Dark / light theme toggle upar right corner me hai.
 
 ## Rules (the short version)
 

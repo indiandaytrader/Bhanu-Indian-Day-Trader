@@ -218,6 +218,7 @@ def monte_carlo(
     n: int = DEFAULT_N,
     seed: int = DEFAULT_SEED,
     start_index: int = FIRST_TRADE_INDEX,
+    collect_outcomes: bool = False,
 ) -> dict:
     """Replay the rest of the session ``n`` times from ``entry``.
 
@@ -244,6 +245,8 @@ def monte_carlo(
     dict with ``target_first_pct``, ``stop_first_pct``, ``neither_pct``,
     ``avg_r``, ``n``, ``decisive`` (target-first + stop-first count) and
     ``reward_risk`` (target distance / stop distance, i.e. R of the target).
+    With ``collect_outcomes=True`` the per-replay R values are also
+    returned as ``"outcomes"`` (for the distribution chart).
 
     Raises
     ------
@@ -278,6 +281,7 @@ def monte_carlo(
     rng = random.Random(seed)
     target_first = stop_first = neither = 0
     total_r = 0.0
+    outcomes: list[float] = []
 
     for _ in range(n):
         price = entry
@@ -308,8 +312,10 @@ def monte_carlo(
         else:
             stop_first += 1
         total_r += outcome
+        if collect_outcomes:
+            outcomes.append(float(outcome))
 
-    return {
+    result = {
         "target_first_pct": 100.0 * target_first / n,
         "stop_first_pct": 100.0 * stop_first / n,
         "neither_pct": 100.0 * neither / n,
@@ -318,6 +324,9 @@ def monte_carlo(
         "decisive": target_first + stop_first,
         "reward_risk": reward / risk,
     }
+    if collect_outcomes:
+        result["outcomes"] = outcomes
+    return result
 
 
 # ---------------------------------------------------------------------------

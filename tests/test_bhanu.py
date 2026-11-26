@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd
 
 from bhanu import alerts, config as config_mod, data as data_mod
+from bhanu import charts as charts_mod
 from bhanu import entry as entry_mod
 from bhanu import exit as exit_mod
 from bhanu import i18n as i18n_mod
@@ -24,6 +25,7 @@ from bhanu import risk as risk_mod
 from bhanu import scanner as scanner_mod
 from bhanu import sizing as sizing_mod
 from bhanu import skills as skills_mod
+from bhanu import structure as structure_mod
 from bhanu import timecheck as timecheck_mod
 from bhanu import timemachine as tm_mod
 
@@ -548,6 +550,389 @@ class TestDashboardNews(unittest.TestCase):
             html = app_mod.home("hi")
         self.assertIn("News unavailable", html)
         self.assertNotIn("Nifty rallies", html)
+
+
+def _structure_bars():
+    """Crafted 5m bars: a downtrend, then a bullish CHoCH, then a BOS."""
+    base = datetime(2026, 11, 26, 9, 15, tzinfo=IST)
+    rows = [
+        # (minutes, open, high, low, close, volume)
+        (0, 100, 101, 99, 100, 1000),
+        (5, 100, 102, 100, 101, 1000),
+        (10, 101, 103, 100, 102, 1000),   # swing high 103
+        (15, 102, 102, 99, 100, 1000),
+        (20, 100, 100, 97, 98, 1000),     # swing low 97
+        (25, 98, 99, 97.5, 99, 1000),
+        (30, 99, 101, 98, 100, 1000),
+        (35, 100, 104, 100, 104, 1000),   # close 104 > 103 -> CHoCH
+        (40, 104, 105, 103, 105, 1000),   # swing high 105
+        (45, 105, 104, 104, 104, 1000),
+        (50, 104, 104, 103, 103, 1000),
+        (55, 103, 106, 103, 106, 1000),   # close 106 > 105 -> BOS
+        (60, 106, 106, 105, 105, 1000),
+    ]
+    idx = pd.DatetimeIndex(
+        [base + pd.Timedelta(minutes=m) for m, *_ in rows], tz=IST
+    )
+    return pd.DataFrame(
+        {
+            "open": [r[1] for r in rows],
+            "high": [r[2] for r in rows],
+            "low": [r[3] for r in rows],
+            "close": [r[4] for r in rows],
+            "volume": [r[5] for r in rows],
+        },
+        index=idx,
+    )
+
+
+def _fvg_bars(filled: bool = False):
+    """Bars with a bullish fair value gap (bar0.high < bar2.low)."""
+    base = datetime(2026, 11, 26, 9, 15, tzinfo=IST)
+    rows = [
+        (0, 100, 100, 99, 99.5, 1000),
+        (5, 99.5, 101, 99, 100, 1000),
+        (10, 102, 103, 102, 102.5, 1000),  # gap [100, 102]
+        (15, 102.5, 104, 103, 103.5, 1000),
+        (20, 103.5, 105, 103, 104, 1000),
+    ]
+    if filled:
+        rows.append((25, 104, 104, 101, 102, 1000))  # low 101 retraces into the gap
+    idx = pd.DatetimeIndex(
+        [base + pd.Timedelta(minutes=m) for m, *_ in rows], tz=IST
+    )
+    return pd.DataFrame(
+        {
+            "open": [r[1] for r in rows],
+            "high": [r[2] for r in rows],
+            "low": [r[3] for r in rows],
+            "close": [r[4] for r in rows],
+            "volume": [r[5] for r in rows],
+        },
+        index=idx,
+    )
+
+
+class TestStructure(unittest.TestCase):
+    def test_vwap_equal_volume_is_mean_typical(self):
+        bars = pd.DataFrame(
+            {
+                "open": [100, 102, 104],
+                "high": [102, 104, 106],
+                "low": [98, 100, 102],
+                "close": [100, 102, 104],
+                "volume": [1000, 1000, 1000],
+            },
+            index=pd.DatetimeIndex(
+                ["2026-11-26 09:15", "2026-11-26 09:20", "2026-11-26 09:25"], tz=IST
+            ),
+        )
+        vw = structure_mod.vwap(bars)
+        self.assertAlmostEqual(vw.iloc[0], 100.0)
+        self.assertAlmostEqual(vw.iloc[-1], 102.0)
+
+    def test_vwap_no_volume_is_nan_not_crash(self):
+        # Index bars carry no volume — VWAP is undefined (NaN), never an error.
+        bars = pd.DataFrame(
+            {
+                "open": [100, 102, 104],
+                "high": [102, 104, 106],
+                "low": [98, 100, 102],
+                "close": [100, 102, 104],
+                "volume": [None, None, None],
+            },
+            index=pd.DatetimeIndex(
+                ["2026-11-26 09:15", "2026-11-26 09:20", "2026-11-26 09:25"], tz=IST
+            ),
+        )
+        vw = structure_mod.vwap(bars)
+        self.assertTrue(vw.isna().all())
+
+    def test_swing_points_in_time_order(self):
+        pts = structure_mod.swing_points(_structure_bars())
+        self.assertEqual([(p["kind"], p["price"]) for p in pts],
+                         [("high", 103.0), ("low", 97.0), ("high", 105.0)])
+        times = [p["time"] for p in pts]
+        self.assertEqual(times, sorted(times))
+
+    def test_structure_breaks_choch_then_bos(self):
+        breaks = structure_mod.structure_breaks(_structure_bars())
+        self.assertEqual(len(breaks), 2)
+        self.assertEqual(breaks[0]["kind"], "CHoCH")
+        self.assertEqual(breaks[0]["direction"], "bullish")
+        self.assertEqual(breaks[0]["price"], 104.0)
+        self.assertEqual(breaks[1]["kind"], "BOS")
+        self.assertEqual(breaks[1]["direction"], "bullish")
+        self.assertEqual(breaks[1]["price"], 106.0)
+
+    def test_structure_breaks_empty_bars(self):
+        empty = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        self.assertEqual(structure_mod.structure_breaks(empty), [])
+        self.assertEqual(structure_mod.swing_points(empty), [])
+
+    def test_order_blocks_last_counter_trend_candle(self):
+        bars = _structure_bars()
+        obs = structure_mod.order_blocks(bars)
+        # Most recent first: BOS break -> bar10 [103, 104]; CHoCH -> bar4 [97, 100].
+        self.assertEqual(len(obs), 2)
+        self.assertEqual(obs[0]["kind"], "bullish")
+        self.assertEqual(obs[0]["top"], 104.0)
+        self.assertEqual(obs[0]["bottom"], 103.0)
+        self.assertEqual(obs[1]["top"], 100.0)
+        self.assertEqual(obs[1]["bottom"], 97.0)
+
+    def test_fvg_unfilled_found(self):
+        fvgs = structure_mod.fair_value_gaps(_fvg_bars(filled=False))
+        self.assertEqual(len(fvgs), 1)
+        self.assertEqual(fvgs[0]["kind"], "bullish")
+        self.assertEqual(fvgs[0]["top"], 102.0)
+        self.assertEqual(fvgs[0]["bottom"], 100.0)
+
+    def test_fvg_filled_dropped(self):
+        self.assertEqual(structure_mod.fair_value_gaps(_fvg_bars(filled=True)), [])
+
+
+class TestCharts(unittest.TestCase):
+    def test_bars_to_candles(self):
+        candles = charts_mod.bars_to_candles(_bars_5m())
+        self.assertEqual(len(candles), 6)
+        self.assertEqual(candles[0]["open"], 25700.0)
+        self.assertEqual(candles[-1]["close"], 25738.0)
+        times = [c["time"] for c in candles]
+        self.assertEqual(times, sorted(times))
+        self.assertTrue(all(isinstance(t, int) for t in times))
+
+    def test_bars_to_line_and_pct(self):
+        line = charts_mod.bars_to_line(_bars_5m())
+        self.assertEqual([p["value"] for p in line],
+                         [25710.0, 25705.0, 25708.0, 25718.0, 25730.0, 25738.0])
+        pct = charts_mod.bars_to_pct_line(_bars_5m())
+        self.assertEqual(pct[0]["value"], 0.0)
+        self.assertAlmostEqual(pct[-1]["value"], (25738 / 25710 - 1) * 100, places=2)
+
+    def test_intraday_series_offline(self):
+        from unittest.mock import patch
+        with patch.object(charts_mod, "fetch_intraday_bars", return_value=_bars_5m()):
+            payload = charts_mod.intraday_series("^NSEI")
+        self.assertEqual(len(payload["candles"]), 6)
+        self.assertEqual(len(payload["line"]), 6)
+        self.assertIsNone(payload["error"])
+
+    def test_intraday_series_error_is_honest(self):
+        from unittest.mock import patch
+        with patch.object(
+            charts_mod, "fetch_intraday_bars",
+            side_effect=data_mod.DataError("Yahoo HTTP 403"),
+        ):
+            payload = charts_mod.intraday_series("^NSEI")
+        self.assertEqual(payload["candles"], [])
+        self.assertIn("403", payload["error"])
+
+    def test_flow_series_offline(self):
+        from unittest.mock import patch
+        with patch.object(charts_mod, "fetch_intraday_bars", return_value=_bars_5m()):
+            flow = charts_mod.flow_series()
+        self.assertEqual(len(flow["series"]), len(data_mod.UNIVERSE))
+        self.assertEqual(flow["failed"], [])
+        nifty = next(s for s in flow["series"] if s["symbol"] == "NIFTY")
+        self.assertTrue(nifty["is_index"])
+        self.assertAlmostEqual(nifty["change_pct"], (25738 / 25710 - 1) * 100, places=2)
+        self.assertGreater(nifty["traded_value"], 0)
+
+    def test_sector_map_from_flow(self):
+        from unittest.mock import patch
+        with patch.object(charts_mod, "fetch_intraday_bars", return_value=_bars_5m()):
+            sectors = charts_mod.sector_map(charts_mod.flow_series())
+        self.assertEqual(len(sectors["sectors"]), len(charts_mod.SECTORS))
+        banks = next(s for s in sectors["sectors"] if s["name"] == "Banks")
+        self.assertEqual(banks["stocks"], 5)
+        self.assertAlmostEqual(banks["change_pct"], (25738 / 25710 - 1) * 100, places=2)
+        self.assertAlmostEqual(banks["rel_pct"], 0.0, places=2)
+        self.assertGreater(banks["traded_value"], 0)
+
+    def test_orb_chart_offline(self):
+        from unittest.mock import patch
+        with patch.object(charts_mod, "fetch_intraday_bars", return_value=_bars_5m()), \
+             patch.object(levels_mod, "fetch_daily_bars", return_value=_levels_daily_bars()):
+            payload = charts_mod.orb_chart("^NSEI", "NIFTY")
+        self.assertEqual(payload["signal"], "long")
+        self.assertEqual(payload["entry"], 25730.0)
+        self.assertEqual(payload["stop"], 25702.5)
+        self.assertEqual(payload["target"], 25785.0)
+        self.assertEqual(len(payload["candles"]), 6)
+        self.assertTrue(len(payload["vwap"]) > 0)
+        labels = {ln["label"] for ln in payload["lines"]}
+        for want in ("ORB HIGH", "ORB LOW", "PDH", "PDL", "ENTRY", "SL", "TP"):
+            self.assertIn(want, labels)
+        box_labels = {b["label"] for b in payload["boxes"]}
+        self.assertIn("TARGET", box_labels)
+        self.assertIn("STOP", box_labels)
+        self.assertIsNone(payload["error"])
+
+    def test_levels_chart_offline(self):
+        from unittest.mock import patch
+        row = {
+            "symbol": "NIFTY", "price": 25748.0,
+            "nearest_support": 25650.0, "nearest_resistance": 25800.0,
+            "pdh": 25800.0, "pdl": 25550.0,
+            "orb_high": 25718.0, "orb_low": 25687.0,
+            "signal": "long", "entry": 25730.0, "stop": 25702.5,
+            "atr_stop": 25690.0, "target": 25785.0, "atr": 10.0,
+        }
+        with patch.object(levels_mod, "compute_levels", return_value=row), \
+             patch.object(charts_mod, "fetch_intraday_bars", return_value=_bars_5m()):
+            payload = charts_mod.levels_chart("^NSEI", "NIFTY")
+        self.assertEqual(len(payload["candles"]), 6)
+        labels = {ln["label"] for ln in payload["lines"]}
+        for want in ("SUPPORT", "RESIST", "PDH", "PDL", "ORB HIGH", "ORB LOW", "ENTRY", "SL", "TP"):
+            self.assertIn(want, labels)
+        self.assertEqual(payload["levels"]["symbol"], "NIFTY")
+        self.assertIsNone(payload["error"])
+
+    def test_mc_histogram_binning(self):
+        hist = charts_mod.mc_histogram([-1.0, -0.5, 0.2, 1.5, 2.0, 2.0], 0.2)
+        self.assertEqual(hist["n"], 6)
+        self.assertEqual([b["count"] for b in hist["buckets"]], [1, 1, 1, 1, 2])
+        self.assertEqual(hist["buckets"][0]["label"], "Stop (-1R)")
+        self.assertEqual(hist["buckets"][4]["label"], "Target (+2R)")
+        self.assertEqual(hist["avg_r"], 0.2)
+        empty = charts_mod.mc_histogram([], None)
+        self.assertEqual(empty["n"], 0)
+        self.assertTrue(all(b["count"] == 0 for b in empty["buckets"]))
+
+    def test_mc_histogram_float_target_lands_in_target_bucket(self):
+        # reward/risk in floats can be 1.9999999… — still a target hit.
+        hist = charts_mod.mc_histogram([139.66 / 69.83, -1.0, 0.5], 0.5)
+        self.assertEqual([b["count"] for b in hist["buckets"]], [1, 0, 1, 0, 1])
+
+
+class TestChartPages(unittest.TestCase):
+    def setUp(self):
+        import os, time
+        from web import app as app_mod
+        app_mod._cache.clear()
+        wl = Path(__file__).resolve().parent.parent / "data" / "watchlist.json"
+        if wl.exists():
+            old = time.time() - 3600
+            os.utime(wl, (old, old))
+
+    def _mock_news(self):
+        return {
+            "symbol": "NIFTY", "moving": False, "change_pct": 0.39, "tags": [],
+            "items": [{"source": "Yahoo headline", "title": "Nifty rallies on FII buying",
+                       "link": "https://example.com/1", "published": "26 Nov 2026", "tags": []}],
+            "latest": [{"source": "Yahoo headline", "title": "Nifty rallies on FII buying",
+                        "link": "https://example.com/1", "published": "26 Nov 2026", "tags": []}],
+            "sources": {"nse_announcements": "ok", "yahoo_headlines": "1 item(s)"},
+            "quote_error": "",
+        }
+
+    def _mock_scan(self):
+        return {
+            "scan": "orb", "run_at_ist": "2026-11-26 12:00:00 IST",
+            "fetched": 39, "usable": 38,
+            "hits": [{"symbol": "NIFTY", "yahoo_symbol": "^NSEI", "direction": "long",
+                      "close": 25730.0, "bar_time": "09:35",
+                      "range_high": 25718.0, "range_low": 25687.0,
+                      "volume": 1500.0, "price_x_volume": 38595000.0,
+                      "date": "2026-11-26"}],
+            "failed": [], "hit_count": 1, "as_of": "2026-11-26 12:00:00 IST",
+        }
+
+    def test_chart_json_escapes_script_close(self):
+        from web import app as app_mod
+        out = app_mod._chart_json({"x": "</script><script>alert(1)</script>"})
+        self.assertNotIn("</script>", out)
+        self.assertIn("<\\/script>", out)
+
+    def test_home_has_charts_flow_sectors_news_orb(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        small = {"symbol": "X", "candles": [{"time": 1, "open": 1, "high": 1, "low": 1, "close": 1}],
+                 "line": [{"time": 1, "value": 1.0}], "error": None}
+        with patch.object(news_mod, "check_symbol", return_value=self._mock_news()), \
+             patch.object(charts_mod, "intraday_series", return_value=small), \
+             patch.object(data_mod, "fetch_quote", return_value={"price": 25900.0, "prev_close": 25819.25, "change_pct": 0.31}), \
+             patch.object(scanner_mod, "scan_orb", return_value=self._mock_scan()):
+            html = app_mod.home("hi")
+        for needle in ("chart-nifty", "chart-bank", "chart-sensex",
+                       "Smart Money Flow", "flow-chart", "Sector Map", "sector-map",
+                       "News Feed", "Nifty rallies on FII buying",
+                       "ORB Hits", "lightweight-charts"):
+            self.assertIn(needle, html)
+
+    def test_orb_page_has_candle_chart(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        payload = {"symbol": "NIFTY",
+                   "candles": [{"time": 1, "open": 1, "high": 1, "low": 1, "close": 1}],
+                   "vwap": [], "lines": [], "markers": [], "boxes": [],
+                   "error": None, "signal": "long"}
+        with patch.object(scanner_mod, "scan_orb", return_value=self._mock_scan()), \
+             patch.object(charts_mod, "orb_chart", return_value=payload):
+            html = app_mod.orb_page("en", {"symbol": ["NIFTY"]})
+        self.assertIn("orb-chart", html)
+        self.assertIn("candlestick with overlays", html)
+        self.assertIn("NIFTY", html)
+
+    def test_levels_page_has_candle_chart(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        row = {"symbol": "NIFTY", "price": 25748.0, "nearest_support": 25650.0,
+               "nearest_resistance": 25800.0, "pdh": 25800.0, "pdl": 25550.0,
+               "entry": 25730.0, "stop": 25702.5, "atr_stop": 25690.0,
+               "target": 25785.0, "signal": "long"}
+        payload = {"symbol": "NIFTY",
+                   "candles": [{"time": 1, "open": 1, "high": 1, "low": 1, "close": 1}],
+                   "vwap": [], "lines": [], "markers": [], "boxes": [],
+                   "error": None, "levels": row}
+        with patch.object(levels_mod, "scan_levels",
+                          return_value={"run_at_ist": "2026-11-26 12:00:00 IST",
+                                        "levels": [row], "failed": []}), \
+             patch.object(charts_mod, "levels_chart", return_value=payload):
+            html = app_mod.levels_page("en", {"symbol": ["NIFTY"]})
+        self.assertIn("levels-chart", html)
+        self.assertIn("candlestick with overlays", html)
+
+    def test_sectors_page_has_map(self):
+        from web import app as app_mod
+        html = app_mod.sectors_page("en")
+        self.assertIn("sector-map", html)
+        self.assertIn("Sector Map", html)
+
+    def test_timemachine_page_has_distribution_chart(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        hist = charts_mod.mc_histogram([-1.0] * 100 + [2.0] * 50 + [0.3] * 20, 0.1)
+        data = {
+            "setup": {"symbol": "NIFTY", "signal": "long", "entry": 25730.0,
+                      "stop": 25702.5, "target": 25785.0, "orb_low": 25687.0,
+                      "orb_high": 25718.0, "price": 25748.0, "atr_stop": None},
+            "setup_error": None,
+            "monte_carlo": {"available": True, "symbol": "NIFTY", "direction": "long",
+                            "entry": 25730.0, "stop": 25702.5, "target": 25785.0,
+                            "n": 170, "target_first_pct": 29.4, "stop_first_pct": 58.8,
+                            "neither_pct": 11.8, "avg_r": 0.1, "reward_risk": 2.0,
+                            "best_case_r": 2.0, "worst_case_r": -1.0,
+                            "verdict": "coin flip", "edge_pts": -4.0,
+                            "break_even_pct": 33.3, "histogram": hist},
+            "trade_check": {"available": False, "reason": "no setup"},
+            "backtest": {"available": False, "reason": "no data"},
+        }
+        with patch.object(timecheck_mod, "collect_timemachine", return_value=data):
+            html = app_mod.timemachine_page("en")
+        self.assertIn("Monte Carlo distribution", html)
+        self.assertIn("Stop (-1R)", html)
+        self.assertIn("Target (+2R)", html)
+        self.assertIn("100", html)  # stop bucket count
+
+    def test_mc_histogram_svg(self):
+        from web import app as app_mod
+        hist = charts_mod.mc_histogram([-1.0, 2.0, 2.0], 0.33)
+        svg = app_mod._mc_histogram_svg(hist)
+        self.assertIn("Stop (-1R)", svg)
+        self.assertIn("Target (+2R)", svg)
+        self.assertIn("+0.33R", svg)
 
 
 if __name__ == "__main__":

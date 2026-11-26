@@ -126,12 +126,17 @@ def monte_carlo_summary(setup: dict[str, Any]) -> dict[str, Any]:
             target=float(target),
             direction=str(direction),
             n=MC_REPLAYS,
+            collect_outcomes=True,
         )
     except ValueError as exc:
         return {"available": False, "reason": str(exc)}
     v = tm_mod.verdict(mc["target_first_pct"], mc["stop_first_pct"], mc["reward_risk"])
     risk = abs(float(entry) - float(stop))
     reward = abs(float(target) - float(entry))
+    # Distribution of the 10,000 replay outcomes (R buckets) for the chart.
+    from bhanu import charts as charts_mod
+
+    histogram = charts_mod.mc_histogram(mc.get("outcomes", []), mc["avg_r"])
     return {
         "available": True,
         "symbol": symbol,
@@ -151,6 +156,7 @@ def monte_carlo_summary(setup: dict[str, Any]) -> dict[str, Any]:
         "verdict": v["verdict"],
         "edge_pts": v["edge_pts"],
         "break_even_pct": v["break_even_pct"],
+        "histogram": histogram,
     }
 
 
