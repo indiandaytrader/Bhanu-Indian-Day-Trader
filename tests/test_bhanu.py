@@ -2395,7 +2395,7 @@ class TestMarketLabLook(unittest.TestCase):
                     {"symbol": "NIFTY", "signal": "long",
                      "entry": 25730.0, "stop": 25702.5}]}):
             html = app_mod._robot_html()
-        for needle in ("tpanel", "BOT — BEST SETUP NOW", "ENTRY", "STOP",
+        for needle in ("tpanel", "AAJ KA BEST SETUP", "ENTRY", "STOP",
                        "R:R", "TP1 — 1R", "TP2 — 2R", "TP3 — 3R",
                        "25,730.00", "25,702.50", "25,757.50"):
             self.assertIn(needle, html)
@@ -2443,6 +2443,206 @@ class TestMarketLabLook(unittest.TestCase):
         html = app_mod._signal_breakdown_html(sig)
         self.assertIn("SIGNAL — NIFTY <span class='opt-put'>PUT</span>", html)
         self.assertNotIn("short", html)
+
+    def test_stock_page_shell_renders(self):
+        from web import app as app_mod
+        html = app_mod.stock_page("en", {"symbol": ["RELIANCE"]})
+        for needle in ("stock-chart", "tfbtn", "opill", "stock-setup",
+                       "stock-summary", "Summary load ho raha hai…",
+                       "bhanuStockLoad('RELIANCE','5m')", "Order block",
+                       "Fair value gaps", "Liquidity", "VWAP", "Trades"):
+            self.assertIn(needle, html)
+        for iv in ("1m", "5m", "15m", "1H", "D"):
+            self.assertIn("data-iv='%s'" % iv, html)
+        self.assertIn("bhanuToggleOverlay", html)
+
+    def test_stock_resolve_sector_and_rank_never_invented(self):
+        from bhanu import stock as stock_mod
+        label, yahoo, in_universe = stock_mod.resolve_symbol("reliance")
+        self.assertEqual((label, yahoo, in_universe),
+                         ("RELIANCE", "RELIANCE.NS", True))
+        self.assertEqual(stock_mod.sector_for("RELIANCE"), "Energy")
+        self.assertEqual(stock_mod.sector_for("NIFTY"), "Index")
+        self.assertIsNone(stock_mod.sector_for("XYZABC"))
+        with self.assertRaises(ValueError):
+            stock_mod.resolve_symbol("XYZABC")
+        # Rank is over our own universe only — never "OF 118".
+        series = [{"symbol": "S%02d" % i, "change_pct": i * 0.1,
+                   "up": i >= 20} for i in range(38)]
+        series.append({"symbol": "NIFTY", "change_pct": 0.25, "up": True})
+        rank = stock_mod.rank_in_flow("NIFTY", {"series": series})
+        self.assertEqual(rank, {"rank": 36, "total": 39, "up": True})
+
+    def test_stock_sessions_keep_short_stock_days(self):
+        # Yahoo drops a trailing 5m bar or two for stocks (RELIANCE
+        # sessions run 72-74 bars, NIFTY 75). A session that starts at
+        # 09:15 and reaches the flat-by bar still counts; only a
+        # session that ends before flat-by is dropped.
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        from bhanu import stock as stock_mod
+        ist = ZoneInfo("Asia/Kolkata")
+        base = datetime(2026, 11, 23, 9, 15, tzinfo=ist)
+        bars = []
+        for day, n in ((0, 75), (1, 73), (2, 60)):
+            for i in range(n):
+                bars.append({"time": base + timedelta(days=day, minutes=5 * i),
+                             "open": 1.0, "high": 1.0, "low": 1.0,
+                             "close": 1.0})
+        sessions = stock_mod._sessions_from_bars(bars)
+        self.assertEqual([len(s) for s in sessions], [75, 73])
+
+    def test_stock_chart_dedupes_close_labels(self):
+        # Bhanu's screenshot: PDL 25,619.00 and TP 25,612.84 printed on
+        # top of each other. The lower-priority label must hide; both
+        # lines are still drawn.
+        from bhanu import charts as charts_mod
+        lines = [
+            {"price": 25619.0, "label": "PDL", "group": "levels"},
+            {"price": 25612.84, "label": "TP", "group": "entry"},
+            {"price": 25800.0, "label": "PDH", "group": "levels"},
+        ]
+        out = charts_mod._dedupe_line_labels(lines, 1000.0)
+        self.assertEqual(len(out), 3)
+        by_label = {ln["label"]: ln for ln in out}
+        self.assertTrue(by_label["TP"].get("label_visible", True))
+        self.assertFalse(by_label["PDL"].get("label_visible", True))
+        self.assertTrue(by_label["PDH"].get("label_visible", True))
+
+    def test_stock_chart_reports_overlay_availability(self):
+        from datetime import datetime
+        from unittest.mock import patch
+        from bhanu import charts as charts_mod
+        from bhanu import data as data_mod
+        today = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d 09:15")
+        bars = data_mod.make_synthetic_bars(
+            60, start_price=25700.0, start=today, freq="5min")
+        row = {"symbol": "NIFTY", "signal": "long", "entry": 25730.0,
+               "stop": 25702.5, "target": 25785.0,
+               "nearest_support": 25650.0, "nearest_resistance": 25800.0,
+               "pdh": 25800.0, "pdl": 25550.0,
+               "orb_high": 25718.0, "orb_low": 25687.0}
+        with patch.object(charts_mod, "fetch_intraday_bars",
+                          return_value=bars):
+            payload = charts_mod.stock_chart("^NSEI", "NIFTY", "5m", row=row)
+        self.assertTrue(payload["candles"])
+        self.assertEqual(set(payload["overlays"]),
+                         {"orderblock", "fvg", "structure", "liquidity",
+                          "vwap", "trades"})
+        self.assertFalse(payload["overlays"]["liquidity"])
+        self.assertTrue(payload["overlays"]["vwap"])
+        # No two visible axis labels sit on top of each other: any two
+        # visible lines are more than the 4% dedupe threshold apart.
+        price_range = float(bars["high"].max() - bars["low"].min())
+        visible = sorted(
+            ln["price"] for ln in payload["lines"]
+            if ln.get("label_visible", True))
+        for a, b in zip(visible, visible[1:]):
+            self.assertGreater(b - a, 0.04 * price_range)
+
+    def test_stock_chart_daily_shows_past_trades(self):
+        from unittest.mock import patch
+        from bhanu import charts as charts_mod
+        from bhanu import data as data_mod
+        daily = data_mod.make_synthetic_bars(
+            180, start_price=25700.0, start="2026-08-03 09:15", freq="B")
+        first_date = str(daily.index[10].date())
+        trades = [{"date": first_date, "direction": "long",
+                   "entry": 25730.0, "stop": 25702.5, "target": 25785.0,
+                   "outcome_r": 2.0, "result": "win"}]
+        row = {"symbol": "NIFTY", "signal": "long", "entry": 25730.0,
+               "stop": 25702.5, "target": 25785.0,
+               "nearest_support": 25650.0, "nearest_resistance": 25800.0,
+               "pdh": 25800.0, "pdl": 25550.0,
+               "orb_high": 25718.0, "orb_low": 25687.0}
+        with patch.object(data_mod, "fetch_daily_bars", return_value=daily):
+            payload = charts_mod.stock_chart(
+                "^NSEI", "NIFTY", "D", row=row, past_trades=trades)
+        self.assertTrue(payload["candles"])
+        self.assertFalse(payload["overlays"]["vwap"])  # no VWAP on daily
+        self.assertTrue(payload["overlays"]["trades"])
+        self.assertTrue(any(m.get("group") == "trades"
+                            for m in payload["markers"]))
+
+    def test_api_stock_shows_real_setup(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        from bhanu import charts as charts_mod
+        from bhanu import data as data_mod
+        from bhanu import levels as levels_mod
+        from bhanu import poller as poller_mod
+        from bhanu import stock as stock_mod
+        app_mod._cache.clear()
+        series = [{"symbol": "S%02d" % i, "change_pct": i * 0.1,
+                   "up": i >= 20} for i in range(38)]
+        series.append({"symbol": "NIFTY", "change_pct": 0.25, "up": True})
+        row = {"symbol": "NIFTY", "signal": "short", "entry": 25752.5,
+               "stop": 25822.33, "target": 25612.84, "price": 25884.5,
+               "orb_high": 25718.0, "orb_low": 25687.0,
+               "nearest_support": 25650.0, "nearest_resistance": 25800.0,
+               "pdh": 25800.0, "pdl": 25550.0}
+        sig = {"decision": "ENTER", "symbol": "NIFTY", "direction": "short",
+               "summary": "ORB trigger, all factors agree",
+               "entry": 25752.5, "stop": 25822.33,
+               "tp1": 25682.67, "tp2": 25612.84, "tp3": 25543.01}
+        hist = {"available": True, "sessions": 42,
+                "first_day": "2026-09-28", "last_day": "2026-11-26",
+                "long": {"fires": 17, "wins": 7, "losses": 7, "neither": 3,
+                         "avg_r": 0.49, "win_rate_pct": 50.0, "net_r": 8.33},
+                "short": {"fires": 9, "wins": 0, "losses": 5, "neither": 4,
+                          "avg_r": -0.362, "win_rate_pct": 0.0, "net_r": -3.26},
+                "trades": []}
+        chart = {"symbol": "NIFTY",
+                 "candles": [{"time": 1, "open": 1, "high": 1, "low": 1,
+                              "close": 1}],
+                 "vwap": [], "lines": [], "markers": [], "boxes": [],
+                 "overlays": {"orderblock": True, "fvg": True,
+                              "structure": True, "liquidity": False,
+                              "vwap": True, "trades": False},
+                 "error": None}
+        with patch.object(data_mod, "fetch_quote",
+                          return_value={"price": 25884.5,
+                                        "prev_close": 25819.25,
+                                        "change_pct": 0.25}), \
+             patch.object(poller_mod, "get_flow",
+                          return_value={"series": series}), \
+             patch.object(levels_mod, "compute_levels", return_value=row), \
+             patch.object(app_mod, "_entry_signal_for", return_value=sig), \
+             patch.object(stock_mod, "orb_history", return_value=hist), \
+             patch.object(charts_mod, "stock_chart", return_value=chart):
+            result = app_mod._api_stock({"symbol": ["NIFTY"],
+                                         "interval": ["5m"]})
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["rank"], {"rank": 36, "total": 39, "up": True})
+        self.assertEqual(result["sector"], "Index")
+        self.assertFalse(result["chart"]["overlays"]["liquidity"])
+        header = result["header_html"]
+        self.assertIn("BULLISH #36 OF 39", header)
+        self.assertNotIn("OF 118", header)
+        self.assertIn("25,884.50", header)
+        setup = result["setup_html"]
+        for needle in ("SETUP READY", "25,752.50", "69.83 pts",
+                       "TP1 — 1R", "TP2 — 2R", "TP3 — 3R",
+                       "opt-put", "Trades", "36.8%", "+5.07R"):
+            self.assertIn(needle, setup)
+        self.assertIn("NSE ke 50 sabse bade stocks", result["summary_html"])
+
+    def test_api_stock_unknown_symbol(self):
+        from web import app as app_mod
+        result = app_mod._api_stock({"symbol": ["XYZABC"]})
+        self.assertIn("error", result)
+        self.assertTrue(result["error"])
+
+    def test_stock_setup_watching_when_no_signal(self):
+        from web import app as app_mod
+        row = {"orb_high": 25718.0, "orb_low": 25687.0,
+               "nearest_support": 25650.0, "nearest_resistance": 25800.0}
+        stats = {"available": False,
+                 "reason": "not enough data — only 3 full sessions (need 20)"}
+        html = app_mod._stock_setup_html(None, row, stats)
+        for needle in ("WATCHING", "Buy above 25,718.00",
+                       "sell below 25,687.00", "not enough data"):
+            self.assertIn(needle, html)
 
     def test_home_renders_fast(self):
         import time

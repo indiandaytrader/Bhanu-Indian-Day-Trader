@@ -247,6 +247,8 @@ def sector_map(flow: dict[str, Any] | None = None) -> dict[str, Any]:
         changes = [by_symbol[m]["change_pct"] for m in present]
         change = sum(changes) / len(changes)
         traded = sum(by_symbol[m].get("traded_value", 0.0) for m in present)
+        # Top member (strongest today) — the bubble links to its detail page.
+        top_member = max(present, key=lambda m: by_symbol[m]["change_pct"])
         sectors.append(
             {
                 "name": name,
@@ -256,6 +258,8 @@ def sector_map(flow: dict[str, Any] | None = None) -> dict[str, Any]:
                 else None,
                 "stocks": len(present),
                 "members": present,
+                "top_member": top_member,
+                "top_change": by_symbol[top_member]["change_pct"],
                 "traded_value": traded,
                 "up": change >= 0,
             }
@@ -273,13 +277,40 @@ def sector_map(flow: dict[str, Any] | None = None) -> dict[str, Any]:
 # Candlestick chart + overlays (ORB / Levels pages)
 # ---------------------------------------------------------------------------
 
-def _price_lines(levels: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Price-line specs for Lightweight Charts (drops None prices)."""
-    return [
-        {"price": lv["price"], "label": lv["label"], "color": lv["color"], "style": lv.get("style", 2)}
+#: Label priority for price lines (1 = most important). When two lines
+#: sit so close that their axis labels would overlap, the lower
+#: priority line keeps its line but loses its label.
+_LINE_PRIORITY: dict[str, int] = {
+    "ENTRY": 1, "SL": 2, "TP": 3, "PDH": 4, "PDL": 5,
+    "ORB HIGH": 6, "ORB LOW": 7, "SUPPORT": 8, "RESIST": 9,
+}
+
+
+def _price_lines(
+    levels: list[dict[str, Any]], price_range: float | None = None
+) -> list[dict[str, Any]]:
+    """Price-line specs for Lightweight Charts (drops None prices).
+
+    Each spec carries ``group`` ("entry" for ENTRY/SL/TP, else
+    "levels") and ``label_visible`` (default True). Axis-label
+    collisions are resolved afterwards by ``_dedupe_line_labels``
+    over the full line set (entry/SL/TP lines are appended later).
+    ``price_range`` is accepted for callers that dedupe here and is
+    otherwise unused.
+    """
+    lines = [
+        {
+            "price": lv["price"],
+            "label": lv["label"],
+            "color": lv["color"],
+            "style": lv.get("style", 2),
+            "group": "entry" if lv["label"] in ("ENTRY", "SL", "TP") else "levels",
+            "label_visible": True,
+        }
         for lv in levels
         if lv.get("price") is not None
     ]
+    return lines
 
 
 def _overlay_payload(
@@ -290,25 +321,40 @@ def _overlay_payload(
     stop: float | None,
     target: float | None,
     signal: str | None,
+    chart_bars: pd.DataFrame | None = None,
+    struct_bars: pd.DataFrame | None = None,
+    vwap: bool = True,
 ) -> dict[str, Any]:
-    """Candles + VWAP + structure markers + OB/FVG boxes + entry boxes."""
-    today = structure_mod.session_bars_today(bars)
-    candles = bars_to_candles(today)
+    """Candles + VWAP + structure markers + OB/FVG boxes + entry boxes.
+
+    ``chart_bars`` are the candles drawn (default: today's session);
+    ``struct_bars`` are the bars the structure is computed on
+    (default: same as ``chart_bars``); ``vwap=False`` skips the VWAP
+    line (daily charts — a session indicator makes no sense there).
+    Boxes carry a ``kind`` (``ob`` / ``fvg`` / ``target`` / ``stop``)
+    and markers a ``group`` (``structure``) so the page can toggle
+    each overlay on and off.
+    """
+    chart_bars = structure_mod.session_bars_today(bars) if chart_bars is None else chart_bars
+    struct_bars = chart_bars if struct_bars is None else struct_bars
+    candles = bars_to_candles(chart_bars)
     if not candles:
         return {"symbol": symbol, "candles": [], "error": "no bars today"}
     last_time = candles[-1]["time"]
 
     # VWAP line (session).
-    vw = structure_mod.vwap(today)
-    vwap_line = [
-        {"time": _unix(ts), "value": round(float(v), 2)}
-        for ts, v in vw.items()
-        if pd.notna(v)
-    ]
+    vwap_line: list[dict[str, Any]] = []
+    if vwap:
+        vw = structure_mod.vwap(struct_bars)
+        vwap_line = [
+            {"time": _unix(ts), "value": round(float(v), 2)}
+            for ts, v in vw.items()
+            if pd.notna(v)
+        ]
 
     # Structure markers: recent swings + CHoCH/BOS breaks.
     markers: list[dict[str, Any]] = []
-    for br in structure_mod.structure_breaks(today):
+    for br in structure_mod.structure_breaks(struct_bars):
         markers.append(
             {
                 "time": br["time"],
@@ -316,9 +362,10 @@ def _overlay_payload(
                 "color": COLOR_DOWN if br["direction"] == "bearish" else COLOR_UP,
                 "shape": "arrowDown" if br["direction"] == "bearish" else "arrowUp",
                 "text": br["kind"],
+                "group": "structure",
             }
         )
-    for sp in structure_mod.swing_points(today)[-6:]:
+    for sp in structure_mod.swing_points(struct_bars)[-6:]:
         markers.append(
             {
                 "time": sp["time"],
@@ -326,14 +373,15 @@ def _overlay_payload(
                 "color": "#9e9e9e",
                 "shape": "circle",
                 "text": "SH" if sp["kind"] == "high" else "SL",
+                "group": "structure",
             }
         )
     markers.sort(key=lambda m: m["time"])
 
     # Boxes: order blocks + FVGs + entry/SL/TP boxes.
     boxes: list[dict[str, Any]] = []
-    breaks = structure_mod.structure_breaks(today)
-    for ob in structure_mod.order_blocks(today, breaks):
+    breaks = structure_mod.structure_breaks(struct_bars)
+    for ob in structure_mod.order_blocks(struct_bars, breaks):
         boxes.append(
             {
                 "top": ob["top"],
@@ -343,9 +391,10 @@ def _overlay_payload(
                 "color": "rgba(38,166,154,0.18)" if ob["kind"] == "bullish" else "rgba(239,83,80,0.18)",
                 "border": COLOR_UP if ob["kind"] == "bullish" else COLOR_DOWN,
                 "label": ob["label"],
+                "kind": "ob",
             }
         )
-    for fvg in structure_mod.fair_value_gaps(today):
+    for fvg in structure_mod.fair_value_gaps(struct_bars):
         boxes.append(
             {
                 "top": fvg["top"],
@@ -355,14 +404,15 @@ def _overlay_payload(
                 "color": "rgba(37,99,235,0.12)",
                 "border": COLOR_INDEX,
                 "label": fvg["label"],
+                "kind": "fvg",
             }
         )
     if entry is not None and stop is not None and target is not None and signal:
         trigger_time = None
-        rng = scanner_mod.orb_range(today)
+        rng = scanner_mod.orb_range(struct_bars)
         if rng is not None:
             rh, rl = rng
-            for ts, row in today.iterrows():
+            for ts, row in struct_bars.iterrows():
                 c = float(row["close"])
                 if (signal == "long" and c > rh) or (signal == "short" and c < rl):
                     trigger_time = _unix(ts)
@@ -377,6 +427,7 @@ def _overlay_payload(
                 "color": "rgba(38,166,154,0.15)",
                 "border": COLOR_UP,
                 "label": "TARGET",
+                "kind": "target",
             }
         )
         boxes.append(
@@ -388,16 +439,25 @@ def _overlay_payload(
                 "color": "rgba(239,83,80,0.15)",
                 "border": COLOR_DOWN,
                 "label": "STOP",
+                "kind": "stop",
             }
         )
 
-    lines = _price_lines(extra_lines)
+    price_range = None
+    if not chart_bars.empty:
+        price_range = float(chart_bars["high"].max() - chart_bars["low"].min())
+    lines = _price_lines(extra_lines, price_range)
     if entry is not None:
-        lines.append({"price": entry, "label": "ENTRY", "color": COLOR_INDEX, "style": 0})
+        lines.append({"price": entry, "label": "ENTRY", "color": COLOR_INDEX, "style": 0, "group": "entry", "label_visible": True})
     if stop is not None:
-        lines.append({"price": stop, "label": "SL", "color": COLOR_DOWN, "style": 0})
+        lines.append({"price": stop, "label": "SL", "color": COLOR_DOWN, "style": 0, "group": "entry", "label_visible": True})
     if target is not None:
-        lines.append({"price": target, "label": "TP", "color": COLOR_UP, "style": 0})
+        lines.append({"price": target, "label": "TP", "color": COLOR_UP, "style": 0, "group": "entry", "label_visible": True})
+    # The entry/SL/TP lines are appended after the dedupe above, so
+    # re-run the collision check over the full set: an ENTRY line a
+    # few points from PDL must not print on top of it.
+    if price_range and price_range > 0:
+        lines = _dedupe_line_labels(lines, price_range)
 
     return {
         "symbol": symbol,
@@ -409,6 +469,37 @@ def _overlay_payload(
         "last_time": last_time,
         "error": None,
     }
+
+
+def _dedupe_line_labels(
+    lines: list[dict[str, Any]], price_range: float
+) -> list[dict[str, Any]]:
+    """Hide the axis label of the lower-priority line in each cluster
+    of lines closer than 4% of ``price_range`` (see ``_price_lines``).
+    The lines themselves are always drawn."""
+    if len(lines) <= 1 or not price_range or price_range <= 0:
+        return lines
+    threshold = 0.04 * price_range
+    ordered = sorted(lines, key=lambda ln: ln["price"])
+
+    def _resolve(cluster: list[dict[str, Any]]) -> None:
+        if len(cluster) <= 1:
+            return
+        best = min(cluster, key=lambda ln: _LINE_PRIORITY.get(ln["label"], 10))
+        for ln in cluster:
+            ln["label_visible"] = ln is best
+
+    cluster: list[dict[str, Any]] = []
+    prev: dict[str, Any] | None = None
+    for ln in ordered:
+        if prev is not None and abs(ln["price"] - prev["price"]) <= threshold:
+            cluster.append(ln)
+        else:
+            _resolve(cluster)
+            cluster = [ln]
+        prev = ln
+    _resolve(cluster)
+    return lines
 
 
 def orb_chart(yahoo_symbol: str, symbol_label: str | None = None) -> dict[str, Any]:
@@ -489,6 +580,129 @@ def levels_chart(yahoo_symbol: str, symbol_label: str | None = None) -> dict[str
         row.get("signal"),
     )
     payload["levels"] = row
+    return payload
+
+
+#: Detail-page intervals: Yahoo interval + how many days to fetch.
+_STOCK_INTERVALS: dict[str, tuple[str, int]] = {
+    "1m": ("1m", 1),
+    "5m": ("5m", 1),
+    "15m": ("15m", 1),
+    "1h": ("1h", 5),
+}
+
+
+def stock_chart(
+    yahoo_symbol: str,
+    symbol_label: str | None = None,
+    interval: str = "5m",
+    row: dict[str, Any] | None = None,
+    past_trades: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Candlestick + overlays for the /stock detail page.
+
+    ``interval`` is one of ``1m`` / ``5m`` / ``15m`` / ``1h`` / ``D``.
+    Intraday intervals use today's session bars (VWAP, order blocks,
+    FVG, structure markers all computed on them); ``D`` uses the last
+    180 daily bars with structure on the last 60 (no VWAP — a session
+    indicator makes no sense on daily bars) plus the symbol's past
+    ORB trades as markers (``past_trades`` from
+    ``bhanu.stock.orb_history``, matched to daily candles by date).
+    Entry/SL/TP + PDH/PDL + ORB lines come from ``row`` (a
+    ``levels.compute_levels`` result; computed here when omitted).
+    Returns ``"overlays"`` availability flags — a group with nothing
+    to show (no order blocks, no past trades, VWAP on D, liquidity
+    always) reports False so the page pill says "unavailable" instead
+    of faking the overlay.
+    """
+    label = symbol_label or yahoo_symbol
+    iv = (interval or "5m").strip()
+    if iv == "1H":
+        iv = "1h"
+    if iv not in ("1m", "5m", "15m", "1h", "D"):
+        return {"symbol": label, "candles": [], "error": f"unknown interval {interval}"}
+    if row is None:
+        try:
+            row = levels_mod.compute_levels(label, yahoo_symbol)
+        except Exception:  # noqa: BLE001 - chart still draws, setup lines omitted
+            row = None
+    row = row or {}
+    entry = row.get("entry")
+    stop = row.get("stop")
+    target = row.get("target")
+    signal = row.get("signal")
+    extra = [
+        {"price": row.get("nearest_support"), "label": "SUPPORT", "color": COLOR_UP, "style": 0},
+        {"price": row.get("nearest_resistance"), "label": "RESIST", "color": COLOR_DOWN, "style": 0},
+        {"price": row.get("pdh"), "label": "PDH", "color": COLOR_PDH, "style": 2},
+        {"price": row.get("pdl"), "label": "PDL", "color": COLOR_PDL, "style": 2},
+        {"price": row.get("orb_high"), "label": "ORB HIGH", "color": COLOR_UP, "style": 2},
+        {"price": row.get("orb_low"), "label": "ORB LOW", "color": COLOR_DOWN, "style": 2},
+    ]
+    if iv == "D":
+        try:
+            from bhanu.data import fetch_daily_bars
+
+            daily = fetch_daily_bars(yahoo_symbol, days=180)
+        except DataError as exc:
+            return {"symbol": label, "candles": [], "error": str(exc)}
+        if daily.empty:
+            return {"symbol": label, "candles": [], "error": "no daily bars returned"}
+        struct = daily.tail(60)
+        payload = _overlay_payload(
+            label, daily, extra, entry, stop, target, signal,
+            chart_bars=daily, struct_bars=struct, vwap=False,
+        )
+        # Past ORB trades as markers, matched to daily candles by date.
+        if past_trades:
+            from datetime import date as _date
+
+            date_to_time = {ts.date(): _unix(ts) for ts in daily.index}
+            for tr in past_trades[-20:]:
+                try:
+                    d = _date.fromisoformat(str(tr.get("date", "")))
+                except ValueError:
+                    continue
+                t = date_to_time.get(d)
+                if t is None:
+                    continue
+                won = tr.get("result") == "win"
+                lost = tr.get("result") == "loss"
+                payload["markers"].append(
+                    {
+                        "time": t,
+                        "position": "aboveBar" if tr.get("direction") == "long" else "belowBar",
+                        "color": COLOR_UP if won else (COLOR_DOWN if lost else "#9e9e9e"),
+                        "shape": "arrowUp" if tr.get("direction") == "long" else "arrowDown",
+                        "text": (
+                            f"{'LONG' if tr.get('direction') == 'long' else 'SHORT'} "
+                            f"{float(tr.get('outcome_r', 0.0)):+.2f}R"
+                        ),
+                        "group": "trades",
+                    }
+                )
+            payload["markers"].sort(key=lambda m: m["time"])
+    else:
+        yahoo_interval, days = _STOCK_INTERVALS[iv]
+        try:
+            bars = fetch_intraday_bars(yahoo_symbol, interval=yahoo_interval, days=days)
+        except DataError as exc:
+            return {"symbol": label, "candles": [], "error": str(exc)}
+        if bars.empty:
+            return {"symbol": label, "candles": [], "error": "no intraday bars returned"}
+        payload = _overlay_payload(label, bars, extra, entry, stop, target, signal)
+    payload["interval"] = iv
+    payload["levels"] = row
+    boxes = payload.get("boxes", [])
+    markers = payload.get("markers", [])
+    payload["overlays"] = {
+        "orderblock": any(b.get("kind") == "ob" for b in boxes),
+        "fvg": any(b.get("kind") == "fvg" for b in boxes),
+        "structure": any(m.get("group") == "structure" for m in markers),
+        "liquidity": False,
+        "vwap": bool(payload.get("vwap")),
+        "trades": any(m.get("group") == "trades" for m in markers),
+    }
     return payload
 
 

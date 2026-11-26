@@ -377,6 +377,36 @@ def fetch_quote(symbol: str) -> dict[str, Any]:
         }
 
 
+def fetch_company_summary(symbol: str) -> str | None:
+    """One-line company description for ``symbol`` (Yahoo assetProfile).
+
+    Returns the ``longBusinessSummary`` string, or ``None`` when Yahoo
+    does not return one. Yahoo's quoteSummary endpoint currently
+    returns HTTP 401 for non-browser clients from this server, so
+    ``None`` is the normal outcome here — callers must show
+    "unavailable", never invent a description. Cached 1 hour (the
+    summary changes rarely).
+    """
+    cache_key = f"summary_{symbol}"
+    cached = _read_cache(cache_key, DAILY_CACHE_TTL)
+    if cached is not None:
+        return cached.get("summary") or None
+    url = (
+        "https://query1.finance.yahoo.com/v10/finance/quoteSummary/"
+        f"{symbol}?modules=assetProfile"
+    )
+    try:
+        payload = _get_json(url)
+        profile = payload["quoteSummary"]["result"][0]["assetProfile"]
+        summary = (profile.get("longBusinessSummary") or "").strip()
+    except Exception:  # noqa: BLE001 - any failure means "unavailable"
+        return None
+    if not summary:
+        return None
+    _write_cache(cache_key, {"summary": summary})
+    return summary
+
+
 # ---------------------------------------------------------------------------
 # Offline test helper
 # ---------------------------------------------------------------------------

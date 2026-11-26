@@ -75,6 +75,7 @@ from bhanu import scanner as scanner_mod
 from bhanu import signal as signal_mod
 from bhanu import sizing as sizing_mod
 from bhanu import skills as skills_mod
+from bhanu import stock as stock_mod
 from bhanu import timecheck as timecheck_mod
 from bhanu import volume as volume_mod
 from bhanu import news as news_mod
@@ -258,6 +259,20 @@ padding:3px 8px;font-size:11px;display:flex;justify-content:space-between;align-
 .tag{{display:inline-block;font-size:9.5px;font-weight:700;border:1px solid currentColor;border-radius:3px;padding:0 5px;line-height:14px}}
 .tag.bull{{color:var(--up)}}.tag.bear{{color:var(--down)}}
 .opt-call{{color:var(--up);font-weight:700}}.opt-put{{color:var(--down);font-weight:700}}
+a.icard,a.tile,a.row{{text-decoration:none;color:inherit}}
+a.icard{{display:block}}
+.tfbtn{{border:1px solid var(--border);background:var(--card);border-radius:6px;padding:4px 10px;font:600 12px Inter,sans-serif;color:var(--text);cursor:pointer;margin-right:4px}}
+.tfbtn.on{{background:#e6edf8;color:var(--accent);border-color:var(--accent)}}
+.opill{{border:1px solid var(--border);background:var(--card);border-radius:999px;padding:4px 11px;font:600 11.5px Inter,sans-serif;color:var(--text);cursor:pointer;margin:2px 3px 2px 0}}
+.opill.on{{background:#e6edf8;color:var(--accent);border-color:var(--accent)}}
+.opill:disabled{{opacity:.45;cursor:not-allowed}}
+.stock-grid{{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:12px;align-items:start}}
+@media (max-width:900px){{.stock-grid{{grid-template-columns:1fr}}}}
+.stock-head{{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}}
+.stock-head .px{{font:700 22px "JetBrains Mono",monospace}}
+.setup-stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin:6px 0}}
+.setup-stats div{{background:#f1f4f8;border-radius:6px;padding:4px 6px;font-size:10px;color:var(--muted)}}
+.setup-stats b{{display:block;font-size:13.5px;color:var(--text);font-family:"JetBrains Mono",monospace}}
 .counts{{font-size:9.5px;font-weight:700}}
 .counts .n{{font:700 20px "JetBrains Mono",monospace;line-height:1}}
 .sm-stage{{display:flex;gap:10px;align-items:stretch}}
@@ -449,6 +464,7 @@ window.bhanuLines = window.bhanuLines || {};
 window.bhanuLiveTimers = window.bhanuLiveTimers || {};
 window.bhanuCandles = window.bhanuCandles || {};
 function bhanuDark(){return document.documentElement.getAttribute('data-theme')==='dark';}
+function bhanuLang(){var m=(location.search||'').match(/lang=(en|hi)/);return m?m[1]:'hi';}
 function bhanuChartOpts(h){
   var dark=bhanuDark();
   return {width:0,height:h||300,
@@ -576,7 +592,8 @@ function bhanuSvgFlow(el, series){
   ordered.forEach(function(ser){
     var col=ser.is_index?'#2563eb':(ser.up?'#2f9e5f':'#d6455d');
     var d=ser.line.map(function(p,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(p.value).toFixed(1);}).join(' ');
-    s+='<path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="'+(ser.is_index?2:1)+'"'+(ser.is_index?' stroke-dasharray="6 4"':'')+' opacity="'+(ser.is_index?1:0.55)+'"/>';
+    var lastV=ser.line[ser.line.length-1].value;
+    s+='<a href="/stock?symbol='+encodeURIComponent(ser.symbol)+'&lang='+bhanuLang()+'" style="cursor:pointer"><title>'+ser.symbol+' '+(lastV>=0?'+':'')+lastV.toFixed(2)+'% — detail page kholo</title><path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="'+(ser.is_index?2:1)+'"'+(ser.is_index?' stroke-dasharray="6 4"':'')+' opacity="'+(ser.is_index?1:0.55)+'"/></a>';
   });
   var bySec={};
   series.forEach(function(ser){if(ser.is_index||!ser.sector){return;}var v=ser.line[ser.line.length-1].value;(bySec[ser.sector]=bySec[ser.sector]||[]).push(v);});
@@ -607,7 +624,7 @@ function bhanuWaterfall(el, series){
     function Y(v){return H-pad-(v-mn)/(mx-mn)*(H-2*pad);}
     var d=pts.map(function(p,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(p.value).toFixed(1);}).join(' ');
     var col=s.up?'#2f9e5f':'#d6455d';
-    return '<div class="tile'+(s.up?'':' bear')+'"><svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%"><path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="1.2" opacity="0.8"/></svg><div class="lab"><b>'+s.symbol+'</b><span>'+(s.sector||'')+'</span></div><span class="rk">'+rank+'</span><span class="px">'+(s.change_pct>=0?'+':'')+s.change_pct.toFixed(2)+'%</span></div>';
+    return '<a class="tile'+(s.up?'':' bear')+'" href="/stock?symbol='+encodeURIComponent(s.symbol)+'&lang='+bhanuLang()+'"><svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%"><path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="1.2" opacity="0.8"/></svg><div class="lab"><b>'+s.symbol+'</b><span>'+(s.sector||'')+'</span></div><span class="rk">'+rank+'</span><span class="px">'+(s.change_pct>=0?'+':'')+s.change_pct.toFixed(2)+'%</span></a>';
   }
   var html='<div class="counts" style="display:flex;gap:14px;margin-bottom:4px"><span class="up">▲ STRONGEST</span><span class="down">▼ WEAKEST</span></div>';
   sorted.slice(0,5).forEach(function(s,i){html+=tile(s,i+1);});
@@ -820,6 +837,8 @@ function bhanuSectorRender(id, p){
     var r=16+40*Math.sqrt((s.traded_value||1)/maxV);
     var cx=X(s.rel_pct===null?0:s.rel_pct),cy=Y(s.change_pct);
     var col=s.up?'#2f9e5f':'#d6455d';
+    var top=s.top_member||(s.members&&s.members[0])||'';
+    svg+='<a href="/stock?symbol='+encodeURIComponent(top)+'&lang='+bhanuLang()+'" style="cursor:pointer"><title>'+s.name+' — top stock '+top+' — detail page kholo</title>';
     if(s.rel_pct!==null&&s.rel_pct>1){
       svg+='<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="'+r.toFixed(1)+'" fill="none" stroke="'+col+'" stroke-width="2"><animate attributeName="r" values="'+r.toFixed(1)+';'+(r+12).toFixed(1)+'" dur="1.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.9;0" dur="1.6s" repeatCount="indefinite"/></circle>';
       svg+='<text x="'+cx.toFixed(1)+'" y="'+(cy-r-8).toFixed(1)+'" text-anchor="middle" font-size="9" font-weight="800" fill="'+col+'">RUNNING</text>';
@@ -827,6 +846,7 @@ function bhanuSectorRender(id, p){
     svg+='<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="'+r.toFixed(1)+'" fill="'+col+'" fill-opacity="0.55" stroke="'+col+'" stroke-width="2"/>';
     svg+='<text x="'+cx.toFixed(1)+'" y="'+(cy-4).toFixed(1)+'" text-anchor="middle" font-size="12" font-weight="bold" fill="'+(bhanuDark()?'#fff':'#141a26')+'">'+s.name+'</text>';
     svg+='<text x="'+cx.toFixed(1)+'" y="'+(cy+12).toFixed(1)+'" text-anchor="middle" font-size="11" fill="'+(bhanuDark()?'#fff':'#141a26')+'">'+(s.change_pct>=0?'+':'')+s.change_pct.toFixed(2)+'%</text>';
+    svg+='</a>';
   });
   var cats={'TECH & MEDIA':['IT','Telecom'],'FINANCIALS':['Banks','Financials'],'HEALTHCARE':['Pharma'],'CONSUMPTION':['FMCG','Auto'],'COMMODITIES & ENERGY':['Metals','Energy'],'INDUSTRIALS & PSU':['Infra']};
   Object.keys(cats).forEach(function(c){
@@ -845,7 +865,8 @@ function bhanuSectorRender(id, p){
     var html='<h3>Themes beating NIFTY <small>'+beating.length+' of '+p.sectors.length+' sectors</small></h3>';
     sorted.forEach(function(s,i){
       var w=Math.min(100,Math.abs(s.change_pct)*40);
-      html+='<div class="row"><span class="muted">'+(i+1)+'</span><span>'+s.name+'</span><span><div class="bar" style="width:'+w+'%;background:'+(s.up?'#2f9e5f':'#d6455d')+'"></div></span><span class="'+(s.up?'up':'down')+'">'+(s.change_pct>=0?'+':'')+s.change_pct.toFixed(2)+'%</span></div>';
+      var top=s.top_member||(s.members&&s.members[0])||'';
+      html+='<a class="row" href="/stock?symbol='+encodeURIComponent(top)+'&lang='+bhanuLang()+'"><span class="muted">'+(i+1)+'</span><span>'+s.name+'</span><span><div class="bar" style="width:'+w+'%;background:'+(s.up?'#2f9e5f':'#d6455d')+'"></div></span><span class="'+(s.up?'up':'down')+'">'+(s.change_pct>=0?'+':'')+s.change_pct.toFixed(2)+'%</span></a>';
       if(i===beating.length-1&&beating.length>0&&beating.length<sorted.length){
         html+='<div class="niftysep"><span>NIFTY '+(nifty>=0?'+':'')+nifty.toFixed(2)+'%</span><span>beating ↓ / lagging ↑</span></div>';
       }
@@ -889,11 +910,89 @@ function bhanuCandleLayout(st){
     var x1=st.chart.timeScale().timeToCoordinate(s.from);
     var x2=s.to?st.chart.timeScale().timeToCoordinate(s.to):w;
     var y1=st.series.priceToCoordinate(s.top),y2=st.series.priceToCoordinate(s.bottom);
-    if(x1===null||y1===null||y2===null){b.el.style.display='none';return;}
+    if(b.hidden||x1===null||y1===null||y2===null){b.el.style.display='none';return;}
     if(x2===null){x2=w;}
     b.el.style.display='block';
     b.el.style.left=x1+'px';b.el.style.width=Math.max(0,x2-x1)+'px';
     b.el.style.top=Math.min(y1,y2)+'px';b.el.style.height=Math.max(0,Math.abs(y2-y1))+'px';
+  });
+}
+function bhanuCandleApplyOverlays(id){
+  // Rebuild every overlay from st.payload + st.overlays (the toggle
+  // state). Price lines are never toggled — entry/SL/TP/levels always
+  // show — but each line's axis label follows its label_visible flag
+  // (the server hides the label of the lower-priority line when two
+  // sit close enough to overlap, e.g. PDL vs TP).
+  var st=(window.bhanuCandles||{})[id];
+  if(!st||!st.payload){return;}
+  var p=st.payload, ov=st.overlays||{};
+  var show=function(k){return ov[k]!==false;};
+  (st.priceLines||[]).forEach(function(h){try{st.series.removePriceLine(h);}catch(e){}});
+  st.priceLines=[];
+  (p.lines||[]).forEach(function(ln){
+    st.priceLines.push(st.series.createPriceLine({price:ln.price,color:ln.color,lineWidth:1,
+      lineStyle:ln.style||2,axisLabelVisible:ln.label_visible!==false,
+      title:ln.label_visible===false?'':ln.label}));
+  });
+  if(show('vwap')&&p.vwap&&p.vwap.length){
+    if(st.vwap){st.vwap.setData(p.vwap);}
+    else{st.vwap=st.chart.addLineSeries({color:'#7e57c2',lineWidth:1,priceLineVisible:false,lastValueVisible:false});st.vwap.setData(p.vwap);}
+  }else if(st.vwap){try{st.chart.removeSeries(st.vwap);}catch(e){} st.vwap=null;}
+  var mk=(p.markers||[]).filter(function(m){
+    var g=m.group||'structure';
+    return g==='trades'?show('trades'):show('structure');
+  });
+  st.series.setMarkers(mk);
+  st.boxes.forEach(function(b){
+    var k=b.spec.kind||'';
+    b.hidden=(k==='ob'&&!show('orderblock'))||(k==='fvg'&&!show('fvg'));
+  });
+  bhanuCandleLayout(st);
+}
+function bhanuToggleOverlay(chartId, key, btn){
+  var st=(window.bhanuCandles||{})[chartId];if(!st){return;}
+  var avail=st.payload&&st.payload.overlays?st.payload.overlays[key]:true;
+  if(avail===false){return;}
+  st.overlays[key]=!st.overlays[key];
+  if(btn){btn.classList.toggle('on',!!st.overlays[key]);}
+  bhanuCandleApplyOverlays(chartId);
+}
+function bhanuStockLoad(symbol, interval){
+  var iv=interval||'5m';
+  var host=document.getElementById('stock-body');if(!host){return;}
+  document.querySelectorAll('#stock-tf .tfbtn').forEach(function(b){
+    b.classList.toggle('on',b.dataset.iv===iv);
+  });
+  fetch('/api/stock?symbol='+encodeURIComponent(symbol)+'&interval='+encodeURIComponent(iv)).then(function(r){
+    if(!r.ok){throw new Error('stock '+r.status);}return r.json();
+  }).then(function(d){
+    if(!d||d.error){throw new Error(d&&d.error?d.error:'no stock data');}
+    var hd=document.getElementById('stock-head');
+    if(hd){hd.innerHTML=d.header_html||'<p class="muted">Header unavailable.</p>';}
+    var sc=document.getElementById('stock-setup');
+    if(sc){sc.innerHTML=d.setup_html||'<p class="muted">Setup unavailable.</p>';}
+    var sm=document.getElementById('stock-summary');
+    if(sm){sm.innerHTML=d.summary_html||'';}
+    var ov=d.chart&&d.chart.overlays?d.chart.overlays:{};
+    document.querySelectorAll('#stock-pills .opill').forEach(function(b){
+      var k=b.dataset.ov;
+      var avail=ov[k]!==false;
+      b.disabled=!avail;
+      if(!avail){b.classList.remove('on');}
+      else{b.classList.add('on');}
+    });
+    var st=(window.bhanuCandles||{})['stock-chart'];
+    if(st&&st.chart){try{st.chart.remove();}catch(e){} delete window.bhanuCandles['stock-chart'];}
+    var el=document.getElementById('stock-chart');
+    if(el){el.innerHTML='';}
+    if(d.chart&&d.chart.candles&&d.chart.candles.length){
+      bhanuCandleRender('stock-chart',d.chart,null);
+    }else if(el){
+      bhanuUnavailable(el,d.chart&&d.chart.error?d.chart.error:'no chart data');
+    }
+    if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
+  }).catch(function(e){
+    host.innerHTML='<p class="muted">Stock data load nahi ho paya — page refresh karein.</p>';
   });
 }
 function bhanuCandleUpdate(id, p){
@@ -901,20 +1000,10 @@ function bhanuCandleUpdate(id, p){
   if(!st){throw new Error('no candle chart');}
   if(!p||p.error||!p.candles||!p.candles.length){throw new Error(p&&p.error?p.error:'no candle data');}
   st.series.setData(p.candles);
-  if(p.vwap&&p.vwap.length){
-    if(st.vwap){st.vwap.setData(p.vwap);}
-    else{st.vwap=st.chart.addLineSeries({color:'#7e57c2',lineWidth:1,priceLineVisible:false,lastValueVisible:false});st.vwap.setData(p.vwap);}
-  }
-  (st.priceLines||[]).forEach(function(h){try{st.series.removePriceLine(h);}catch(e){}});
-  st.priceLines=[];
-  (p.lines||[]).forEach(function(ln){
-    st.priceLines.push(st.series.createPriceLine({price:ln.price,color:ln.color,lineWidth:1,
-      lineStyle:ln.style||2,axisLabelVisible:true,title:ln.label}));
-  });
-  st.series.setMarkers(p.markers||[]);
+  st.payload=p;
   st.boxes.forEach(function(b){if(b.el.parentNode){b.el.parentNode.removeChild(b.el);}});
   st.boxes=bhanuCandleBoxes(st.wrap,p.boxes||[]);
-  bhanuCandleLayout(st);
+  bhanuCandleApplyOverlays(id);
 }
 function bhanuCandleRender(id, p, refreshUrl){
   var wrap=document.getElementById(id+'-wrap');var el=document.getElementById(id);
@@ -944,18 +1033,15 @@ function bhanuCandleRender(id, p, refreshUrl){
     vw=ch.addLineSeries({color:'#7e57c2',lineWidth:1,priceLineVisible:false,lastValueVisible:false});
     vw.setData(p.vwap);
   }
-  var st={chart:ch,series:cs,vwap:vw,priceLines:[],boxes:[],wrap:wrap,el:el};
-  (p.lines||[]).forEach(function(ln){
-    st.priceLines.push(cs.createPriceLine({price:ln.price,color:ln.color,lineWidth:1,
-      lineStyle:ln.style||2,axisLabelVisible:true,title:ln.label}));
-  });
-  if(p.markers&&p.markers.length){cs.setMarkers(p.markers);}
+  var st={chart:ch,series:cs,vwap:vw,priceLines:[],boxes:[],wrap:wrap,el:el,payload:p,
+    overlays:{orderblock:true,fvg:true,structure:true,liquidity:false,vwap:true,trades:true}};
+  window.bhanuCandles[id]=st;
   st.boxes=bhanuCandleBoxes(wrap,p.boxes||[]);
+  bhanuCandleApplyOverlays(id);
   function layout(){bhanuCandleLayout(st);}
   ch.timeScale().subscribeVisibleTimeRangeChange(layout);
   ch.timeScale().subscribeVisibleLogicalRangeChange(layout);
   window.addEventListener('resize',function(){ch.applyOptions({width:el.clientWidth||900});layout();});
-  window.bhanuCandles[id]=st;
   if(refreshUrl){
     window.bhanuRefreshers.push(function(){
       return fetch(refreshUrl).then(function(r){
@@ -1251,22 +1337,26 @@ def _line_chart_block(chart_id: str, label: str, yahoo_symbol: str,
     )
 
 
-def _candle_chart_block(chart_id: str, symbol: str) -> str:
+def _candle_chart_block(chart_id: str, symbol: str, note: str | None = None) -> str:
     """A candlestick + overlays card, loaded lazily: the page renders
     instantly with a "loading" state and the page loader
-    (``bhanuOrbLoad`` / ``bhanuLevelsLoad``) fetches the data from
-    /api/orbchart or /api/levelschart — no Yahoo fetch ever blocks a
-    page render. ``symbol`` is the chart symbol when known from the
-    URL, else '' (the loader fills it in from the scan)."""
+    (``bhanuOrbLoad`` / ``bhanuLevelsLoad`` / ``bhanuStockLoad``)
+    fetches the data from /api/orbchart, /api/levelschart or
+    /api/stock — no Yahoo fetch ever blocks a page render. ``symbol``
+    is the chart symbol when known from the URL, else '' (the loader
+    fills it in from the scan)."""
     heading = (
         f"{_esc(symbol)} — candlestick with overlays"
         if symbol else "Candlestick with overlays"
     )
+    note_html = note or (
+        "Candles: 5m. Purple line = VWAP. Dashed lines = ORB range / PDH / PDL / "
+        "support / resistance. Green box = target zone, red box = stop zone, "
+        "pale boxes = order blocks / fair value gaps. Arrows = CHoCH / BOS breaks."
+    )
     return (
         f"<div class='card'><h3>{heading}</h3>"
-        f"<p class='muted'>Candles: 5m. Purple line = VWAP. Dashed lines = ORB range / PDH / PDL / "
-        f"support / resistance. Green box = target zone, red box = stop zone, "
-        f"pale boxes = order blocks / fair value gaps. Arrows = CHoCH / BOS breaks.</p>"
+        f"<p class='muted'>{note_html}</p>"
         f"<div id='{chart_id}-wrap' class='chart-wrap'>"
         f"<div id='{chart_id}' class='chart-box tall'>"
         f"<p class='loading'>Chart load ho raha hai…</p></div></div></div>"
@@ -1311,27 +1401,28 @@ def _mc_histogram_svg(hist: dict) -> str:
     )
 
 
-def _index_cards_html() -> str:
+def _index_cards_html(lang: str = "hi") -> str:
     """Three index cards (NIFTY / BANK NIFTY / SENSEX) in the reference
     tile style: 76px tile, sparkline on top, label overlay, price +
     change in the foot. Filled in lazily by ``bhanuQuoteFetch``
     (/api/quotes) and the 5s live-line ticks, which also draw each
     card's sparkline from the same /api/live line. Cell ids:
     ``q-<slug>-price`` / ``q-<slug>-chg`` / ``q-<slug>-prev`` /
-    ``q-<slug>-spark`` / ``q-<slug>-card``."""
+    ``q-<slug>-spark`` / ``q-<slug>-card``. Each card links to that
+    index's /stock detail page."""
     cards = ""
-    for _symbol, label, slug in (
-        ("^NSEI", "NIFTY 50", "nsei"),
-        ("^NSEBANK", "BANK NIFTY", "nsebank"),
-        ("^BSESN", "SENSEX", "bsesn"),
+    for _symbol, label, slug, name in (
+        ("^NSEI", "NIFTY 50", "nsei", "NIFTY"),
+        ("^NSEBANK", "BANK NIFTY", "nsebank", "BANKNIFTY"),
+        ("^BSESN", "SENSEX", "bsesn", "SENSEX"),
     ):
         cards += (
-            f"<div class='icard' id='q-{slug}-card'>"
+            f"<a class='icard' id='q-{slug}-card' href='/stock?symbol={name}&lang={lang}'>"
             f"<div class='spark' id='q-{slug}-spark'></div>"
             f"<div class='lab'><b>{_esc(label)}</b></div>"
             f"<div class='foot'><b id='q-{slug}-price'>loading…</b>"
             f"<span id='q-{slug}-chg'>—</span>"
-            f"<span class='muted' id='q-{slug}-prev'>prev close —</span></div></div>"
+            f"<span class='muted' id='q-{slug}-prev'>prev close —</span></div></a>"
         )
     return f"<div class='index-cards'>{cards}</div>"
 
@@ -1559,7 +1650,7 @@ def home(lang: str) -> str:
     )
     body = (
         f"<div class='card'><h3>{t('home')} — indices</h3>"
-        f"{_index_cards_html()}"
+        f"{_index_cards_html(lang)}"
         f"{paper_html}"
         f"<p>{t('flat_by')}: 15:15 IST. ORB range 09:15–09:30 IST.</p></div>"
         f"{chart_cards}{flow_html}{sector_html}{robot_html}{news_html}{orb_html}"
@@ -1896,6 +1987,254 @@ def levels_page(lang: str, query: dict | None = None) -> str:
         live=True,
         active="levels",
     )
+
+
+def _stock_setup_html(sig: dict | None, row: dict | None, stats: dict | None) -> str:
+    """Right-side SETUP card for the /stock detail page (SETUP READY
+    card, our own data): trigger, entry/SL/TP1/TP2/TP3,
+    risk in ₹ (stocks) or points (indices) and %, R:R, the
+    combined-signal summary, and the symbol's real ORB backtest
+    stats. No signal -> WATCHING with the pending trigger (buy above
+    the ORB high / sell below the low on a 5m close) and nearest
+    support/resistance."""
+
+    def _f(value) -> str:
+        return f"{value:,.2f}" if value is not None else "—"
+
+    row = row or {}
+    if stats and stats.get("available"):
+        tot_fires = stats["long"]["fires"] + stats["short"]["fires"]
+        tot_wins = stats["long"]["wins"] + stats["short"]["wins"]
+        tot_losses = stats["long"]["losses"] + stats["short"]["losses"]
+        net_r = stats["long"]["net_r"] + stats["short"]["net_r"]
+        avg_r = (
+            (stats["long"]["avg_r"] * stats["long"]["fires"]
+             + stats["short"]["avg_r"] * stats["short"]["fires"]) / tot_fires
+            if tot_fires else 0.0
+        )
+        dec = tot_wins + tot_losses
+        wr = f"{100.0 * tot_wins / dec:.1f}%" if dec else "—"
+        stats_html = (
+            f"<div class='setup-stats'>"
+            f"<div>Trades<b>{tot_fires}</b></div>"
+            f"<div>Win rate<b>{wr}</b></div>"
+            f"<div>Net R<b>{net_r:+.2f}R</b></div>"
+            f"<div>Avg / trade<b>{avg_r:+.3f}R</b></div></div>"
+            f"<p class='muted'>ORB backtest — {stats['sessions']} sessions "
+            f"({stats['first_day']} to {stats['last_day']}), 5m bars. "
+            f"Long {stats['long']['fires']} fires · "
+            f"Short {stats['short']['fires']} fires.</p>"
+        )
+    else:
+        reason = (stats or {}).get("reason", "no data")
+        stats_html = f"<p class='muted'>Backtest unavailable — {_esc(reason)}.</p>"
+    if not sig or sig.get("decision") == "NO SIGNAL":
+        orb_high, orb_low = row.get("orb_high"), row.get("orb_low")
+        trigger = ""
+        if orb_high is not None and orb_low is not None:
+            trigger = (f"Buy above {_f(orb_high)} / sell below {_f(orb_low)} "
+                       f"on a 5m close.")
+        return (
+            f"<div class='card'><h3>SETUP</h3><div class='tpanel'>"
+            f"<div class='tt'><span>SETUP</span><span>WATCHING</span></div>"
+            f"<div class='st none'><b>WATCHING</b> — no ORB trigger yet today. {trigger} "
+            f"Nearest support {_f(row.get('nearest_support'))}, resistance "
+            f"{_f(row.get('nearest_resistance'))}.</div>{stats_html}</div></div>"
+        )
+    direction = sig["direction"]
+    symbol = str(sig.get("symbol", ""))
+    unit = "pts" if symbol in data_mod.INDICES else "₹"
+    entry, stop = float(sig["entry"]), float(sig["stop"])
+    tp1, tp2, tp3 = sig["tp1"], sig["tp2"], sig["tp3"]
+    risk = abs(entry - stop)
+    risk_pct = 100.0 * risk / entry if entry else 0.0
+    decision = sig["decision"]
+    st_class = "sig" if decision == "ENTER" else ("warn" if "HALF" in decision else "none")
+    title = {"ENTER": "SETUP READY", "HALF SIZE": "HALF SIZE",
+             "BLOCKED": "BLOCKED"}.get(decision, decision)
+    return (
+        f"<div class='card'><h3>SETUP</h3><div class='tpanel'>"
+        f"<div class='tt'><span>SETUP — {_opt(direction)}</span><span>{title}</span></div>"
+        f"<div class='tn'>{title} — triggered @ {_f(entry)} "
+        f"<span class='muted'>{_esc(sig.get('summary', ''))}</span></div>"
+        f"<div class='ts'><div>ENTRY<b>{_f(entry)}</b></div>"
+        f"<div>STOP<b>{_f(stop)}</b></div>"
+        f"<div>RISK<b>{_f(risk)} {unit} ({risk_pct:.2f}%)</b></div></div>"
+        f"<div class='tr'><span>TP1 — 1R</span><b>{_f(tp1)}</b></div>"
+        f"<div class='tr'><span>TP2 — 2R</span><b>{_f(tp2)}</b></div>"
+        f"<div class='tr'><span>TP3 — 3R</span><b>{_f(tp3)}</b></div>"
+        f"{_rr_bar_html(entry, stop, tp2)}"
+        f"<div class='st {st_class}'><b>{decision}</b> — {_esc(sig.get('summary', ''))}</div>"
+        f"{stats_html}</div></div>"
+    )
+
+
+def stock_page(lang: str, query: dict | None = None) -> str:
+    """Per-stock detail page — renders INSTANTLY. Header, setup card,
+    summary and chart all load lazily from /api/stock
+    (``bhanuStockLoad``). Timeframe buttons switch the chart
+    interval; overlay pills toggle the chart overlays (an unavailable
+    overlay's pill is disabled)."""
+    symbol = ((query or {}).get("symbol") or ["NIFTY"])[0].upper()
+    symbol = "".join(c for c in symbol if c.isalnum() or c in ".^") or "NIFTY"
+    tf_buttons = "".join(
+        f"<button class='tfbtn{' on' if iv == '5m' else ''}' data-iv='{iv}' "
+        f"onclick=\"bhanuStockLoad('{symbol}','{iv}')\">{iv}</button>"
+        for iv in ("1m", "5m", "15m", "1H", "D")
+    )
+    pills = "".join(
+        f"<button class='opill on' data-ov='{key}' "
+        f"onclick=\"bhanuToggleOverlay('stock-chart','{key}',this)\">{label}</button>"
+        for key, label in (
+            ("orderblock", "Order block"), ("fvg", "Fair value gaps"),
+            ("structure", "Structure"), ("liquidity", "Liquidity"),
+            ("vwap", "VWAP"), ("trades", "Trades"),
+        )
+    )
+    note = (
+        "Candles: interval buttons se badlo. Purple line = VWAP. Dashed lines = "
+        "ORB range / PDH / PDL / support / resistance. Green box = target zone, "
+        "red box = stop zone, pale boxes = order blocks / fair value gaps. "
+        "Arrows = CHoCH / BOS breaks. Daily chart par purane ORB trades ke "
+        "win/loss markers bhi dikhte hain."
+    )
+    body = (
+        f"<div id='stock-body'>"
+        f"<div class='card' id='stock-head'><p class='loading'>Stock load ho raha hai…</p></div>"
+        f"<div class='card'><div id='stock-tf'>{tf_buttons}</div>"
+        f"<div id='stock-pills' style='margin-top:8px'>{pills}</div></div>"
+        f"<div class='stock-grid'>"
+        f"<div>{_candle_chart_block('stock-chart', symbol, note=note)}</div>"
+        f"<div id='stock-setup'><p class='loading'>Setup load ho raha hai…</p></div>"
+        f"</div>"
+        f"<div id='stock-summary'><p class='loading'>Summary load ho raha hai…</p></div>"
+        f"</div>"
+    )
+    return _page(
+        lang, f"{symbol} — Stock detail", body,
+        head_extra=_chart_lib_tag(),
+        scripts=_chart_js() + f"<script>bhanuStockLoad('{symbol}','5m');</script>",
+        live=True,
+        active="",
+    )
+
+
+def _api_stock(query: dict) -> dict:
+    """Full /stock detail payload: header, setup card, chart, summary.
+
+    Cached 120 s per symbol+interval. Every number is real (Yahoo/NSE
+    free data) or the section says "unavailable" — nothing invented.
+    """
+    symbol_q = (query.get("symbol") or ["NIFTY"])[0]
+    interval = (query.get("interval") or ["5m"])[0]
+    try:
+        label, yahoo_symbol, in_universe = stock_mod.resolve_symbol(symbol_q)
+    except ValueError as exc:
+        return {"symbol": symbol_q, "error": str(exc)}
+
+    def _build() -> dict:
+        try:
+            q = data_mod.fetch_quote(yahoo_symbol)
+            price, prev_close, change_pct = (
+                q.get("price"), q.get("prev_close"), q.get("change_pct"))
+        except Exception:  # noqa: BLE001 - price just unavailable
+            price = prev_close = change_pct = None
+        flow = poller_mod.get_flow()
+        if flow is None:
+            try:
+                flow = _cached("api:flow", 300, charts_mod.flow_series)
+            except Exception:  # noqa: BLE001
+                flow = None
+        rank = stock_mod.rank_in_flow(label, flow) if in_universe else None
+        sector = stock_mod.sector_for(label)
+        try:
+            row = _cached(
+                f"levelsrow:{label}", 60,
+                lambda: levels_mod.compute_levels(label, yahoo_symbol),
+            )
+        except Exception:  # noqa: BLE001
+            row = None
+        sig = None
+        if row and row.get("signal") and row.get("entry") and row.get("stop") and row.get("target"):
+            try:
+                sig = _entry_signal_for(
+                    label, row["signal"], row["entry"], row["stop"], row["target"],
+                    support=row.get("nearest_support"),
+                    resistance=row.get("nearest_resistance"),
+                    yahoo_symbol=yahoo_symbol,
+                )
+            except Exception:  # noqa: BLE001 - setup card degrades to WATCHING
+                sig = None
+        try:
+            hist = stock_mod.orb_history(yahoo_symbol)
+        except Exception:  # noqa: BLE001
+            hist = {"available": False, "reason": "backtest failed"}
+        past_trades = hist.get("trades", []) if hist.get("available") else []
+        try:
+            chart = _cached(
+                f"stockchart:{label}:{interval}", 120,
+                lambda: charts_mod.stock_chart(
+                    yahoo_symbol, label, interval, row=row, past_trades=past_trades),
+            )
+        except Exception as exc:  # noqa: BLE001
+            chart = {"symbol": label, "candles": [], "error": str(exc)}
+        summary_text, summary_source = stock_mod.simple_words(label, yahoo_symbol)
+        if rank:
+            rank_txt = (
+                f"{'BULLISH' if rank['up'] else 'BEARISH'} "
+                f"#{rank['rank']} OF {rank['total']}"
+            )
+            rank_html = (
+                f"<span class='tag {'bull' if rank['up'] else 'bear'}'>{rank_txt}</span>"
+            )
+        else:
+            rank_html = "<span class='muted'>Rank unavailable</span>"
+        if price is not None and change_pct is not None:
+            price_html = (
+                f"<span class='px'>{price:,.2f}</span>"
+                f"<span class='{'up' if change_pct >= 0 else 'down'}'>"
+                f"{'+' if change_pct >= 0 else ''}{change_pct:.2f}%</span>"
+                + (f"<span class='muted'>prev close {prev_close:,.2f}</span>"
+                   if prev_close is not None else "")
+            )
+        else:
+            price_html = "<span class='muted'>Price unavailable</span>"
+        header_html = (
+            f"<div class='stock-head'><h2 style='margin:0'>{_esc(label)}</h2>"
+            f"<span class='muted'>{_esc(sector) if sector else 'Sector unavailable'}</span>"
+            f"{rank_html}{price_html}</div>"
+        )
+        if summary_text:
+            summary_html = (
+                f"<div class='card'><h3>IN SIMPLE WORDS</h3><p>{_esc(summary_text)}</p>"
+                f"<p class='muted'>Source: {_esc(summary_source)}.</p></div>"
+            )
+        else:
+            summary_html = (
+                "<div class='card'><h3>IN SIMPLE WORDS</h3>"
+                "<p class='muted'>Company summary unavailable — Yahoo se nahi mila.</p></div>"
+            )
+        return {
+            "symbol": label,
+            "yahoo_symbol": yahoo_symbol,
+            "in_universe": in_universe,
+            "sector": sector,
+            "price": price,
+            "prev_close": prev_close,
+            "change_pct": change_pct,
+            "rank": rank,
+            "header_html": header_html,
+            "setup_html": _stock_setup_html(sig, row, hist),
+            "summary_html": summary_html,
+            "chart": chart,
+            "stats": hist,
+            "error": None,
+        }
+
+    try:
+        return _cached(f"stock:{label}:{interval}", 120, _build)
+    except Exception as exc:  # noqa: BLE001
+        return {"symbol": label, "error": str(exc)}
 
 
 def sectors_page(lang: str) -> str:
@@ -2587,7 +2926,7 @@ def _robot_html() -> str:
             rr_txt = "—"
         panel = (
             f"<div class='tpanel'>"
-            f"<div class='tt'><span>BOT — BEST SETUP NOW</span>"
+            f"<div class='tt'><span>AAJ KA BEST SETUP</span>"
             f"<span>{live_badge}</span></div>"
             f"<div class='tn'>{_esc(symbol)} {_opt(direction)} "
             f"<span class='muted'>fresh scan {_clock(ticks.get('scans', ''))}</span></div>"
@@ -2605,7 +2944,7 @@ def _robot_html() -> str:
     else:
         panel = (
             f"<div class='tpanel'>"
-            f"<div class='tt'><span>BOT — BEST SETUP NOW</span>"
+            f"<div class='tt'><span>AAJ KA BEST SETUP</span>"
             f"<span>{live_badge}</span></div>"
             f"<div class='st none'><b>WATCHING</b> — no ORB signal right now, "
             f"robot is watching.</div></div>"
@@ -2814,6 +3153,9 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/skills":
                 self._send_json(_api_skills())
                 return
+            if parsed.path == "/api/stock":
+                self._send_json(_api_stock(query))
+                return
             if parsed.path.startswith("/static/"):
                 served = _static_file(parsed.path[len("/static/"):])
                 if served is None:
@@ -2833,6 +3175,8 @@ class Handler(BaseHTTPRequestHandler):
                 body = orb_page(lang, query)
             elif parsed.path == "/levels":
                 body = levels_page(lang, query)
+            elif parsed.path == "/stock":
+                body = stock_page(lang, query)
             elif parsed.path == "/sectors":
                 body = sectors_page(lang)
             elif parsed.path == "/chain":
