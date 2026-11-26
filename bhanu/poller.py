@@ -18,6 +18,10 @@ on-demand fetchers only when the engine has nothing yet):
       headlines) for the 3 indices every 5 min.
     * scans — ORB scan every 2 min, levels every 2 min, Time Machine
       (10,000 Monte Carlo replays) every 10 min.
+    * daily_prev — previous trading day's close per index, from Yahoo
+      daily bars, every 10 min: the middle source for the pinned
+      previous close (NSE has no SENSEX row and Yahoo spark's
+      ``chartPreviousClose`` goes stale).
     * snapshot — today's intraday state is written to disk every
       5 minutes while open, and reloaded on start, so a restart still
       shows the day's real data instead of nothing.
@@ -67,6 +71,10 @@ POLL_SCAN_FAST_S = 120
 POLL_SCAN_SLOW_S = 600
 POLL_TM_FAST_S = 600
 POLL_TM_SLOW_S = 1800
+#: Previous-close from Yahoo daily bars (the pin's middle source):
+#: the value changes once a day, so 10 min / 30 min is plenty.
+POLL_DAILY_PREV_FAST_S = 600
+POLL_DAILY_PREV_SLOW_S = 1800
 POLL_SNAPSHOT_FAST_S = 300
 POLL_SNAPSHOT_SLOW_S = 3600
 
@@ -79,6 +87,14 @@ NSE_ALL_INDICES_URL = "https://www.nseindia.com/api/allIndices"
 SPARK_URL = (
     "https://query1.finance.yahoo.com/v7/finance/spark"
     "?symbols={symbols}&range=1d&interval=1m"
+)
+#: Yahoo v8 daily chart (one symbol per call) — the previous-close
+#: source of last resort's replacement: the close of the last daily
+#: bar dated before today. Spark's ``chartPreviousClose`` goes stale
+#: for indices (see _pin_prevs), daily bars do not.
+DAILY_URL = (
+    "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    "?range=5d&interval=1d"
 )
 SPARK_URL_FALLBACK = SPARK_URL.replace(
     "query1.finance.yahoo.com", "query2.finance.yahoo.com", 1)
@@ -137,9 +153,13 @@ def _fresh_state() -> dict:
         "snapshot_at": "",
         "errors": 0,
         "slow_until": 0.0,
+        # Previous trading day's close from Yahoo daily bars, per
+        # index: {name: {"value", "date"}}. The pin's middle source —
+        # set by the daily_prev job, never by the fetch threads.
+        "daily_prev": {},
         # Pinned previous close per index: {name: {"value", "source",
-        # "date"}}. NSE first, Yahoo only as fallback — set by
-        # get_quotes(), never by the fetch threads.
+        # "date"}}. NSE first, daily bars second, Yahoo spark last —
+        # set by get_quotes(), never by the fetch threads.
         "prev_pinned": {},
     }
 
@@ -295,6 +315,37 @@ def fetch_spark(symbols: list[str]) -> dict[str, dict]:
         out.update(parse_spark(payload))
         time.sleep(0.08)
     return out
+
+
+def parse_daily_prev(payload: dict, today=None) -> dict | None:
+    """Yahoo v8 daily chart payload -> previous trading day's close.
+
+    Returns ``{"value", "date"}`` for the last daily bar dated
+    strictly before ``today`` (IST), or None when there is no such
+    bar. The bar for ``today`` itself (partial while the market is
+    open) is never the previous close; before the open, the last bar
+    IS yesterday's close and is picked up the same way.
+    """
+    result = ((payload or {}).get("chart", {}) or {}).get("result") or [None]
+    row = result[0] or {}
+    stamps = row.get("timestamp") or []
+    quote = ((row.get("indicators", {}) or {}).get("quote") or [{}])[0]
+    closes = quote.get("close") or []
+    today = (today or _now_ist().date()).isoformat()
+    best = None
+    for ts, close in zip(stamps, closes):
+        if ts is None or close is None:
+            continue
+        day = datetime.fromtimestamp(int(ts), tz=IST).date().isoformat()
+        if day < today:
+            best = {"value": float(close), "date": day}
+    return best
+
+
+def fetch_daily_prev(symbol: str) -> dict | None:
+    """Previous close for one Yahoo symbol from its daily bars."""
+    url = DAILY_URL.format(symbol=urllib.parse.quote(symbol))
+    return parse_daily_prev(_fetch_json(url))
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +515,27 @@ def _snapshot_payload() -> dict:
         }
 
 
+def _tick_daily_prev() -> None:
+    """Previous trading day's close per index, from Yahoo daily
+    bars. The pin's middle source: NSE has no SENSEX row and Yahoo
+    spark's ``chartPreviousClose`` goes stale (see _pin_prevs)."""
+    ok = False
+    for name in ("NIFTY", "BANKNIFTY", "SENSEX"):
+        try:
+            prev = fetch_daily_prev(INDEX_YAHOO[name])
+        except Exception:  # noqa: BLE001 - keep last good value
+            _bump_errors()
+            continue
+        if not prev:
+            _bump_errors()
+            continue
+        with _LOCK:
+            STATE.setdefault("daily_prev", {})[name] = prev
+        ok = True
+    if ok:
+        _mark_tick("daily_prev")
+
+
 def _tick_snapshot() -> None:
     if not is_open():
         return
@@ -519,6 +591,8 @@ _JOBS: tuple[tuple[str, float, float, object], ...] = (
     ("news", POLL_NEWS_FAST_S, POLL_NEWS_SLOW_S, _tick_news),
     ("scans", POLL_SCAN_FAST_S, POLL_SCAN_SLOW_S, _tick_scans),
     ("timemachine", POLL_TM_FAST_S, POLL_TM_SLOW_S, _tick_timemachine),
+    ("daily_prev", POLL_DAILY_PREV_FAST_S, POLL_DAILY_PREV_SLOW_S,
+     _tick_daily_prev),
     ("snapshot", POLL_SNAPSHOT_FAST_S, POLL_SNAPSHOT_SLOW_S, _tick_snapshot),
 )
 
@@ -573,38 +647,55 @@ def is_running() -> bool:
 # Readers — what the dashboard serves (copies, never the live dicts)
 # ---------------------------------------------------------------------------
 
+#: Previous-close source priority (higher wins, see _pin_prevs).
+_PIN_PRIORITY = {"yahoo": 1, "daily": 2, "nse": 3}
+
+
 def _pin_prevs(indices: dict, spark: dict) -> dict:
     """Pin each index's previous close to ONE source per trading day
-    (lock must be held). NSE's ``previousClose`` first, Yahoo's
-    ``chartPreviousClose`` only when NSE has none. A Yahoo fallback
-    upgrades to NSE the moment NSE data arrives; an NSE pin is never
-    replaced by Yahoo — the two sources disagreed on 26 Nov 2026
-    (NIFTY NSE 25,819.25 vs Yahoo 25,349.70) and alternating between
-    them made % change jump between two bases."""
+    (lock must be held). Source priority: NSE's ``previousClose``
+    first, then the previous trading day's close from Yahoo daily
+    bars, then Yahoo spark's ``chartPreviousClose`` as a last resort.
+
+    A pin only ever upgrades to a strictly higher-priority source;
+    it never downgrades and never flips. An NSE pin is never
+    replaced. The daily-bars source exists because Yahoo spark's
+    ``chartPreviousClose`` goes stale for indices: on 26 Nov 2026 it
+    still said SENSEX 82,436.00 (the 23 Nov close) while the true
+    25 Nov close was 83,938.28 — and NSE lists no SENSEX row, so
+    SENSEX had only the stale Yahoo fallback and showed +2.30%
+    instead of +0.47%. Yahoo's spark prev is stale for NIFTY
+    (25,349.70) and BANKNIFTY (62,585.40) too; their correct NSE pins
+    only masked it. If NSE ever drops, the daily-bars source now
+    catches all three instead of the stale spark value."""
     pinned = STATE.setdefault("prev_pinned", {})
+    daily = STATE.get("daily_prev", {})
     today = _now_ist().date().isoformat()
     for name in ("NIFTY", "BANKNIFTY", "SENSEX"):
         yahoo = INDEX_YAHOO[name]
+        candidates = []
         nse_prev = indices.get(name, {}).get("prev")
+        if nse_prev is not None:
+            candidates.append((3, float(nse_prev), "nse"))
+        daily_prev = daily.get(name, {}).get("value")
+        if daily_prev is not None:
+            candidates.append((2, float(daily_prev), "daily"))
         yahoo_prev = spark.get(yahoo, {}).get("prev")
+        if yahoo_prev is not None:
+            candidates.append((1, float(yahoo_prev), "yahoo"))
+        if not candidates:
+            continue
+        best_prio, best_val, best_src = max(
+            candidates, key=lambda c: c[0])
         pin = pinned.get(name)
         if pin is None or pin.get("date") != today:
-            if nse_prev is not None:
-                pin = {"value": float(nse_prev), "source": "nse",
-                       "date": today}
-            elif yahoo_prev is not None:
-                pin = {"value": float(yahoo_prev), "source": "yahoo",
-                       "date": today}
-            else:
-                pin = None
-            if pin is not None:
-                pinned[name] = pin
-        elif pin.get("source") == "yahoo" and nse_prev is not None:
-            # One-time upgrade, Yahoo fallback -> NSE. Never the
-            # reverse direction, and never back again.
-            pin = {"value": float(nse_prev), "source": "nse",
-                   "date": today}
-            pinned[name] = pin
+            pinned[name] = {"value": best_val, "source": best_src,
+                            "date": today}
+        elif _PIN_PRIORITY.get(pin.get("source"), 0) < best_prio:
+            # One-way upgrade to a better source (Yahoo -> daily,
+            # Yahoo/daily -> NSE). Never the reverse direction.
+            pinned[name] = {"value": best_val, "source": best_src,
+                            "date": today}
     return dict(pinned)
 
 

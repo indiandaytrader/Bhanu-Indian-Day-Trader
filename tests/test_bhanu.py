@@ -2448,6 +2448,7 @@ class TestPoller(unittest.TestCase):
         # to NSE — once — and never flips back to Yahoo afterwards.
         import time as _time
         poller_mod.STATE["prev_pinned"] = {}
+        poller_mod.STATE["daily_prev"] = {}
         poller_mod.STATE["indices"] = {}
         poller_mod.STATE["spark"] = {
             "^NSEI": {"ltp": 25900.0, "prev": 25349.70,
@@ -2483,6 +2484,138 @@ class TestPoller(unittest.TestCase):
         second = next(q for q in poller_mod.get_quotes()
                       if q["symbol"] == "^NSEI")
         self.assertEqual(second["prev_close"], 25683.85)
+
+    def _daily_payload(self):
+        # Real Yahoo daily bars for ^BSESN, 19-26 Nov 2026
+        # (24 Nov was a holiday — no bar). Closes: 19 Nov 83,021.75;
+        # 20 Nov 83,919.71; 23 Nov 82,435.99; 25 Nov 83,938.28;
+        # 26 Nov 84,328.59.
+        days = [(19, 83021.75), (20, 83919.71), (23, 82435.99),
+                (25, 83938.28), (26, 84328.59)]
+        stamps = [int(datetime(2026, 11, d, 9, 15, tzinfo=IST)
+                       .timestamp()) for d, _ in days]
+        closes = [c for _, c in days]
+        return {"chart": {"result": [{"timestamp": stamps,
+                                      "indicators": {"quote": [
+                                          {"close": closes}]}}]}}
+
+    def test_parse_daily_prev_picks_last_bar_before_today(self):
+        # 26 Nov 2026: today's bar (84,328.59) is partial and must
+        # never be the previous close; the 25 Nov bar is.
+        prev = poller_mod.parse_daily_prev(
+            self._daily_payload(), today=datetime(2026, 11, 26).date())
+        self.assertEqual(prev, {"value": 83938.28, "date": "2026-11-25"})
+
+    def test_parse_daily_prev_before_open(self):
+        # No bar for today yet: the last bar IS yesterday's close.
+        payload = self._daily_payload()
+        payload["chart"]["result"][0]["timestamp"] = \
+            payload["chart"]["result"][0]["timestamp"][:-1]
+        payload["chart"]["result"][0]["indicators"]["quote"][0]["close"] = \
+            payload["chart"]["result"][0]["indicators"]["quote"][0][
+                "close"][:-1]
+        prev = poller_mod.parse_daily_prev(
+            payload, today=datetime(2026, 11, 26).date())
+        self.assertEqual(prev, {"value": 83938.28, "date": "2026-11-25"})
+
+    def test_parse_daily_prev_none_without_earlier_bar(self):
+        payload = {"chart": {"result": [{"timestamp": [
+            int(datetime(2026, 11, 26, 9, 15, tzinfo=IST).timestamp())],
+            "indicators": {"quote": [{"close": [84328.59]}]}}]}}
+        self.assertIsNone(poller_mod.parse_daily_prev(
+            payload, today=datetime(2026, 11, 26).date()))
+
+    def test_get_quotes_sensex_prev_close_from_daily_bars(self):
+        # Regression (26 Nov 2026): NSE lists no SENSEX row, so the
+        # pin fell back to Yahoo spark's chartPreviousClose — stale
+        # at 82,436.00 (23 Nov close) — and SENSEX showed +2.30%
+        # instead of the true +0.47% vs the 25 Nov close 83,938.28.
+        # The daily-bars source must win over the stale spark value.
+        import time as _time
+        poller_mod.STATE["prev_pinned"] = {}
+        poller_mod.STATE["daily_prev"] = {
+            "SENSEX": {"value": 83938.28, "date": "2026-11-25"}}
+        indices = poller_mod.parse_all_indices(self._indices_payload())
+        indices.pop("SENSEX")  # live NSE has no SENSEX row
+        poller_mod.STATE["indices"] = indices
+        poller_mod.STATE["spark"] = {
+            "^NSEI": {"ltp": 25884.50, "prev": 25349.70,
+                      "time": int(_time.time()), "closes": []},
+            "^NSEBANK": {"ltp": 63535.30, "prev": 62585.40,
+                         "time": int(_time.time()), "closes": []},
+            "^BSESN": {"ltp": 84328.59, "prev": 82436.00,
+                       "time": int(_time.time()), "closes": []}}
+        quotes = poller_mod.get_quotes()
+        sensex = next(q for q in quotes if q["symbol"] == "^BSESN")
+        self.assertEqual(sensex["prev_close"], 83938.28)
+        # (84,328.59 - 83,938.28) / 83,938.28 = 0.464996% -> 0.46.
+        self.assertAlmostEqual(sensex["change_pct"], 0.46, places=2)
+        # NIFTY/BANKNIFTY still pin to their correct NSE values.
+        nifty = next(q for q in quotes if q["symbol"] == "^NSEI")
+        self.assertEqual(nifty["prev_close"], 25683.85)
+        bank = next(q for q in quotes if q["symbol"] == "^NSEBANK")
+        self.assertEqual(bank["prev_close"], 63468.0)
+
+    def test_get_quotes_prev_close_upgrades_yahoo_to_daily(self):
+        # Engine starts on Yahoo only: prev is the Yahoo fallback.
+        # The moment the daily-bars value arrives the pin upgrades
+        # to it — and then to NSE when NSE arrives, never back.
+        import time as _time
+        poller_mod.STATE["prev_pinned"] = {}
+        poller_mod.STATE["daily_prev"] = {}
+        poller_mod.STATE["indices"] = {}
+        poller_mod.STATE["spark"] = {
+            "^NSEI": {"ltp": 25900.0, "prev": 25349.70,
+                      "time": int(_time.time()), "closes": []}}
+        first = next(q for q in poller_mod.get_quotes()
+                     if q["symbol"] == "^NSEI")
+        self.assertEqual(first["prev_close"], 25349.70)
+        poller_mod.STATE["daily_prev"] = {
+            "NIFTY": {"value": 25819.25, "date": "2026-11-25"}}
+        second = next(q for q in poller_mod.get_quotes()
+                      if q["symbol"] == "^NSEI")
+        self.assertEqual(second["prev_close"], 25819.25)
+        poller_mod.STATE["indices"] = poller_mod.parse_all_indices(
+            {"data": [{"index": "NIFTY 50", "last": 25900.0,
+                       "percentChange": 0.31, "variation": 80.75,
+                       "previousClose": 25819.25, "open": 25850.0}]})
+        third = next(q for q in poller_mod.get_quotes()
+                     if q["symbol"] == "^NSEI")
+        self.assertEqual(third["prev_close"], 25819.25)
+        poller_mod.STATE["indices"] = {}
+        fourth = next(q for q in poller_mod.get_quotes()
+                      if q["symbol"] == "^NSEI")
+        self.assertEqual(fourth["prev_close"], 25819.25)
+
+    def test_get_quotes_prev_close_daily_catches_missing_nse(self):
+        # The same stale-spark hole, for NIFTY: NSE missing from the
+        # start must pin to the daily-bars value, never to Yahoo's
+        # stale 25,349.70.
+        import time as _time
+        poller_mod.STATE["prev_pinned"] = {}
+        poller_mod.STATE["daily_prev"] = {
+            "NIFTY": {"value": 25819.25, "date": "2026-11-25"}}
+        poller_mod.STATE["indices"] = {}
+        poller_mod.STATE["spark"] = {
+            "^NSEI": {"ltp": 25884.50, "prev": 25349.70,
+                      "time": int(_time.time()), "closes": []}}
+        quote = next(q for q in poller_mod.get_quotes()
+                     if q["symbol"] == "^NSEI")
+        self.assertEqual(quote["prev_close"], 25819.25)
+        self.assertAlmostEqual(quote["change_pct"], 0.25, places=2)
+
+    def test_tick_daily_prev_writes_state(self):
+        from unittest.mock import patch
+        poller_mod.STATE["daily_prev"] = {}
+        with patch.object(poller_mod, "fetch_daily_prev",
+                          return_value={"value": 83938.28,
+                                        "date": "2026-11-25"}):
+            poller_mod._tick_daily_prev()
+        self.assertEqual(
+            poller_mod.STATE["daily_prev"]["SENSEX"],
+            {"value": 83938.28, "date": "2026-11-25"})
+        self.assertIn("daily_prev", poller_mod.STATE["ticks"])
+        poller_mod.STATE["daily_prev"] = {}
 
     def test_get_quotes_stale_spark_ignored(self):
         import time as _time
