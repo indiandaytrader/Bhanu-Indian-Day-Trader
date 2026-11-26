@@ -113,6 +113,28 @@ def _esc(value) -> str:
     return html.escape(str(value))
 
 
+def _opt(direction) -> str:
+    """User-facing option label for a trade direction: CALL (green) for
+    a long, PUT (red) for a short. Display only — the internal
+    direction stays 'long'/'short' everywhere (API JSON, logic,
+    sizing, poller)."""
+    if str(direction).lower() == "short":
+        return "<span class='opt-put'>PUT</span>"
+    if str(direction).lower() == "long":
+        return "<span class='opt-call'>CALL</span>"
+    return _esc(direction)
+
+
+def _opt_text(direction) -> str:
+    """Plain-text CALL/PUT label for contexts that cannot render HTML
+    (e.g. JS textContent). Same mapping as _opt."""
+    if str(direction).lower() == "short":
+        return "PUT"
+    if str(direction).lower() == "long":
+        return "CALL"
+    return str(direction)
+
+
 #: TradingView Lightweight Charts (pinned version). The library is
 #: bundled locally (web/static/lightweight-charts.js, Apache 2.0) so
 #: charts render even when the CDN is slow or blocked — a chart is
@@ -235,6 +257,7 @@ padding:3px 8px;font-size:11px;display:flex;justify-content:space-between;align-
 .loading{{color:var(--muted);font-style:italic}}
 .tag{{display:inline-block;font-size:9.5px;font-weight:700;border:1px solid currentColor;border-radius:3px;padding:0 5px;line-height:14px}}
 .tag.bull{{color:var(--up)}}.tag.bear{{color:var(--down)}}
+.opt-call{{color:var(--up);font-weight:700}}.opt-put{{color:var(--down);font-weight:700}}
 .counts{{font-size:9.5px;font-weight:700}}
 .counts .n{{font:700 20px "JetBrains Mono",monospace;line-height:1}}
 .sm-stage{{display:flex;gap:10px;align-items:stretch}}
@@ -1048,7 +1071,7 @@ function bhanuMCRender(mc){
   if(hist&&mc.histogram){hist.innerHTML=bhanuMCHistHTML(mc.histogram);}
   function set(id,txt){var e=document.getElementById(id);if(e){e.textContent=txt;}}
   set('mc-title','Monte Carlo Time Machine — '+Number(mc.n).toLocaleString('en-IN')+' replays');
-  set('mc-setup',mc.symbol+' '+mc.direction+' entry '+mc.entry+', stop '+mc.stop+', target '+mc.target+'.');
+  set('mc-setup',mc.symbol+' '+(mc.direction==='short'?'PUT':mc.direction==='long'?'CALL':mc.direction)+' entry '+mc.entry+', stop '+mc.stop+', target '+mc.target+'.');
   set('mc-target-pct',Number(mc.target_first_pct).toFixed(1)+'%');
   set('mc-stop-pct',Number(mc.stop_first_pct).toFixed(1)+'%');
   set('mc-neither-pct',Number(mc.neither_pct).toFixed(1)+'%');
@@ -1381,7 +1404,7 @@ def _orb_table_html(result: dict, lang: str, limit: int = 50) -> str:
         except (KeyError, TypeError, ValueError):
             tps = "—"
         return (
-            f"<tr><td>{_esc(h.get('symbol', ''))}</td><td>{_esc(h.get('direction', ''))}</td>"
+            f"<tr><td>{_esc(h.get('symbol', ''))}</td><td>{_opt(h.get('direction', ''))}</td>"
             f"<td>{_esc(h.get('close', ''))}</td><td>{_esc(h.get('bar_time', ''))}</td>"
             f"<td>{_esc(h.get('range_high', ''))} – {_esc(h.get('range_low', ''))}</td>"
             f"<td>{tps}</td></tr>"
@@ -1706,7 +1729,7 @@ def _signal_breakdown_html(sig: dict) -> str:
     return (
         f"<div class='tpanel'>"
         f"<div class='tt'><span>SIGNAL — {_esc(sig.get('symbol', ''))} "
-        f"{_esc(sig.get('direction', ''))}</span><span>{decision}</span></div>"
+        f"{_opt(sig.get('direction', ''))}</span><span>{decision}</span></div>"
         f"<div class='tn'>{decision}{size_note} "
         f"<span class='muted'>{_esc(sig.get('summary', ''))}</span></div>"
         f"<div class='ts'><div>ENTRY<b>{_f(sig.get('entry'))}</b></div>"
@@ -1805,7 +1828,7 @@ def _levels_table_html(result: dict, lang: str) -> str:
             f"<td>{_fmt(r.get('pdh'))}</td><td>{_fmt(r.get('pdl'))}</td>"
             f"<td>{_fmt(r.get('entry'))}</td><td>{_sl(r)}</td>"
             f"<td>{tp1}</td><td>{tp2}</td><td>{tp3}</td>"
-            f"<td>{_esc(r.get('signal') or 'None')}</td></tr>"
+            f"<td>{_opt(r.get('signal')) if r.get('signal') else 'None'}</td></tr>"
         )
 
     body_rows = "".join(_body_row(r) for r in rows)
@@ -1959,7 +1982,7 @@ def _timemachine_body(data: dict) -> str:
     if setup:
         setup_html = (
             f"<div class='card'><h3>Today's best ORB setup</h3>"
-            f"<p>{_esc(setup.get('symbol', ''))} {_esc(setup.get('signal', ''))} — "
+            f"<p>{_esc(setup.get('symbol', ''))} {_opt(setup.get('signal', ''))} — "
             f"entry {_fmt(setup.get('entry'))}, stop {_fmt(setup.get('stop'))}"
             + (f" (1.5x ATR {_fmt(setup.get('atr_stop'))})" if setup.get("atr_stop") else "")
             + f", target {_fmt(setup.get('target'))}, "
@@ -1980,7 +2003,7 @@ def _timemachine_body(data: dict) -> str:
         mc_html = (
             hist_html
             + f"<div class='card' id='mc-card'><h3 id='mc-title'>Monte Carlo Time Machine — {mc['n']:,} replays</h3>"
-            f"<p id='mc-setup'>{_esc(mc.get('symbol', ''))} {_esc(mc.get('direction', ''))} "
+            f"<p id='mc-setup'>{_esc(mc.get('symbol', ''))} {_opt(mc.get('direction', ''))} "
             f"entry {_fmt(mc.get('entry'))}, stop {_fmt(mc.get('stop'))}, "
             f"target {_fmt(mc.get('target'))}.</p>"
             f"<div class='table-wrap'><table><tr><th>Outcome</th><th>Share</th></tr>"
@@ -2004,7 +2027,7 @@ def _timemachine_body(data: dict) -> str:
     if tc.get("available"):
         lim = tc["limits"]
         tc_html = (
-            f"<div class='card'><h3>Trade check — {tc['symbol']} {tc['direction']}</h3>"
+            f"<div class='card'><h3>Trade check — {tc['symbol']} {_opt(tc['direction'])}</h3>"
             f"<p>Risk gate: <b>{tc['gate_verdict']}</b>"
             + (f" — {_esc(tc['gate_reason'])}" if tc.get("gate_reason") and tc["gate_reason"] != "ok" else "")
             + f". Sizing: {tc['sizing_verdict']} — {_esc(tc['sizing_reason'])}.</p>"
@@ -2035,13 +2058,13 @@ def _timemachine_body(data: dict) -> str:
             d = bt["directions"].get(direction, {})
             if d.get("available"):
                 bt_rows += (
-                    f"<tr><td>ORB {direction}</td><td>{d['fires']}</td>"
+                    f"<tr><td>ORB {_opt(direction)}</td><td>{d['fires']}</td>"
                     f"<td>{d['target_wins']}</td><td>{d['stop_losses']}</td>"
                     f"<td>{d['neither']}</td><td>{d['avg_r']:+.3f}R</td></tr>"
                 )
             else:
                 bt_rows += (
-                    f"<tr><td>ORB {direction}</td><td colspan='5'>unavailable — "
+                    f"<tr><td>ORB {_opt(direction)}</td><td colspan='5'>unavailable — "
                     f"{_esc(d.get('reason', ''))}</td></tr>"
                 )
         bt_html = (
@@ -2165,14 +2188,14 @@ def paper_page(lang: str) -> str:
         return _page(lang, t("paper_trading"), f"<p>unavailable: {_esc(exc)}</p>", active="paper")
     pos_rows = "".join(
         f"<tr><td>{_esc(p.get('id', ''))}</td><td>{_esc(p.get('symbol', ''))}</td>"
-        f"<td>{_esc(p.get('direction', ''))}</td><td>{_esc(p.get('qty', ''))}</td>"
+        f"<td>{_opt(p.get('direction', ''))}</td><td>{_esc(p.get('qty', ''))}</td>"
         f"<td>{_esc(p.get('entry', ''))}</td><td>{_esc(p.get('stop', ''))}</td>"
         f"<td>{_esc(p.get('target', ''))}</td></tr>"
         for p in positions
     )
     tr_rows = "".join(
         f"<tr><td>{_esc(tr.get('id', ''))}</td><td>{_esc(tr.get('symbol', ''))}</td>"
-        f"<td>{_esc(tr.get('direction', ''))}</td><td>{_esc(tr.get('exit_price', ''))}</td>"
+        f"<td>{_opt(tr.get('direction', ''))}</td><td>{_esc(tr.get('exit_price', ''))}</td>"
         f"<td>{_esc(tr.get('realised_pnl', ''))}</td><td>{_esc(tr.get('reason', ''))}</td></tr>"
         for tr in trades[-20:]
     )
@@ -2194,7 +2217,7 @@ def paper_page(lang: str) -> str:
             exit_rows += (
                 f"<tr><td>{_esc(p.get('id', ''))}</td>"
                 f"<td>{_esc(p.get('symbol', ''))}</td>"
-                f"<td>{_esc(p.get('direction', ''))}</td>"
+                f"<td>{_opt(p.get('direction', ''))}</td>"
                 f"<td><b>{_esc(check['action'])}</b></td>"
                 f"<td>{_esc(check['reason'])}</td></tr>"
             )
@@ -2202,7 +2225,7 @@ def paper_page(lang: str) -> str:
             exit_rows += (
                 f"<tr><td>{_esc(p.get('id', ''))}</td>"
                 f"<td>{_esc(p.get('symbol', ''))}</td>"
-                f"<td>{_esc(p.get('direction', ''))}</td>"
+                f"<td>{_opt(p.get('direction', ''))}</td>"
                 f"<td><b>HOLD</b></td>"
                 f"<td>Exit check unavailable — {_esc(exc)}</td></tr>"
             )
@@ -2566,7 +2589,7 @@ def _robot_html() -> str:
             f"<div class='tpanel'>"
             f"<div class='tt'><span>BOT — BEST SETUP NOW</span>"
             f"<span>{live_badge}</span></div>"
-            f"<div class='tn'>{_esc(symbol)} {_esc(direction)} "
+            f"<div class='tn'>{_esc(symbol)} {_opt(direction)} "
             f"<span class='muted'>fresh scan {_clock(ticks.get('scans', ''))}</span></div>"
             f"<div class='ts'><div>ENTRY<b>{float(entry):,.2f}</b></div>"
             f"<div>STOP<b>{float(stop):,.2f}</b></div>"
@@ -2654,7 +2677,7 @@ def _levels_mini_html(result: dict) -> str:
         f"<tr><td>{_esc(r.get('symbol', ''))}</td><td>{_fmt(r.get('price'))}</td>"
         f"<td>{_fmt(r.get('nearest_support'))}</td>"
         f"<td>{_fmt(r.get('nearest_resistance'))}</td>"
-        f"<td>{_esc(r.get('signal') or 'None')}</td></tr>"
+        f"<td>{_opt(r.get('signal')) if r.get('signal') else 'None'}</td></tr>"
         for r in rows
     )
     if not rows:
@@ -2702,7 +2725,7 @@ def _tm_mini_html(data: dict) -> str:
     if setup:
         lines += (
             f"<p><b>{_esc(setup.get('symbol', ''))} "
-            f"{_esc(setup.get('signal', ''))}</b> — entry "
+            f"{_opt(setup.get('signal', ''))}</b> — entry "
             f"{_fmt(setup.get('entry'))}, stop {_fmt(setup.get('stop'))}, "
             f"target {_fmt(setup.get('target'))}.</p>"
         )

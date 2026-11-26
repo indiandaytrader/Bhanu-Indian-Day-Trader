@@ -82,12 +82,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "hi": "15:15 tak flat",
     },
     "long": {
-        "en": "Long",
-        "hi": "Long",
+        "en": "CALL",
+        "hi": "CALL",
     },
     "short": {
-        "en": "Short",
-        "hi": "Short",
+        "en": "PUT",
+        "hi": "PUT",
     },
     "no_signal": {
         "en": "No signal",

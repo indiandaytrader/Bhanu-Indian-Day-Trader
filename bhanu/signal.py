@@ -52,6 +52,14 @@ MC_BREAKEVEN_2R = 100.0 / 3.0
 #: proven stale, and blocking on it would be a guess either way.
 FRESH_WINDOW = timedelta(hours=24)
 
+
+def opt_label(direction: str) -> str:
+    """User-facing option label for a trade direction: CALL for a long,
+    PUT for a short. Display only — the internal direction stays
+    'long'/'short' everywhere (logic, API, sizing)."""
+    return "PUT" if str(direction).lower() == "short" else "CALL"
+
+
 # ---------------------------------------------------------------------------
 # News sentiment (keyword scoring on headlines)
 # ---------------------------------------------------------------------------
@@ -223,7 +231,7 @@ def news_factor(
             "available": True,
             "verdict": "block",
             "reason": (
-                f"Fresh news against this {direction}: "
+                f"Fresh news against this {opt_label(direction)}: "
                 f"'{against[0].get('title', '')}' "
                 f"({against[0].get('source', '')}"
                 + (f", {against[0].get('published', '')}" if against[0].get("published") else "")
@@ -240,7 +248,7 @@ def news_factor(
             "available": True,
             "verdict": "support",
             "reason": (
-                f"Fresh news supports this {direction}: "
+                f"Fresh news supports this {opt_label(direction)}: "
                 f"'{supporting[0].get('title', '')}' "
                 f"({supporting[0].get('source', '')}"
                 + (f", {supporting[0].get('published', '')}" if supporting[0].get("published") else "")
@@ -494,7 +502,7 @@ def entry_signal(
             "tp3": tp3,
             "factors": {},
             "reasons": ["No ORB setup — no entry, stop or target today."],
-            "summary": f"{symbol} {direction}: no ORB signal today.",
+            "summary": f"{symbol} {opt_label(direction)}: no ORB signal today.",
         }
     risk = abs(float(entry) - float(stop))
     sign = 1.0 if direction == "long" else -1.0
@@ -514,7 +522,7 @@ def entry_signal(
         "orb": {
             "verdict": "trigger",
             "reason": (
-                f"ORB {direction}: first completed 5m bar closed "
+                f"ORB {opt_label(direction)}: first completed 5m bar closed "
                 f"{'above' if direction == 'long' else 'below'} the "
                 f"09:15–09:30 range at {float(entry):,.2f}."
             ),
@@ -541,12 +549,12 @@ def entry_signal(
     blocked = [name for name, f in factors.items() if f["verdict"] == "block"]
     halved = [name for name, f in factors.items() if f["verdict"] == "half"]
     if decision == "BLOCKED":
-        summary = f"{symbol} {direction}: BLOCKED by {', '.join(blocked)}."
+        summary = f"{symbol} {opt_label(direction)}: BLOCKED by {', '.join(blocked)}."
     elif decision == "HALF SIZE":
-        summary = f"{symbol} {direction}: HALF SIZE — {', '.join(halved)}."
+        summary = f"{symbol} {opt_label(direction)}: HALF SIZE — {', '.join(halved)}."
     else:
         summary = (
-            f"{symbol} {direction}: ENTER @ {float(entry):,.2f}, "
+            f"{symbol} {opt_label(direction)}: ENTER @ {float(entry):,.2f}, "
             f"SL {float(stop):,.2f}, TP1 {float(tp1):,.2f} / "
             f"TP2 {float(target):,.2f} / TP3 {float(tp3):,.2f}."
         )
@@ -645,7 +653,7 @@ def exit_signal(
         "direction": direction,
         "action": action,
         "reason": (
-            f"{action} — fresh news against this {direction}: "
+            f"{action} — fresh news against this {opt_label(direction)}: "
             f"'{top.get('title', '')}' ({top.get('source', '')}"
             + (f", {top.get('published', '')}" if top.get("published") else "")
             + f") — {len(against)} against item(s)."

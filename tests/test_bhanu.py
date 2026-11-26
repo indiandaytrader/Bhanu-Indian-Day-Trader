@@ -2415,11 +2415,34 @@ class TestMarketLabLook(unittest.TestCase):
                    "mc": {"verdict": "ALLOW", "reason": "target hit 40%"},
                    "volume": {"verdict": "STRONG", "reason": "1.8x average"}}}
         html = app_mod._signal_breakdown_html(sig)
-        for needle in ("tpanel", "SIGNAL — NIFTY long", "ENTRY", "STOP",
+        for needle in ("tpanel", "SIGNAL — NIFTY <span class='opt-call'>CALL</span>",
+                       "ENTRY", "STOP",
                        "R:R", "TP1 — 1R", "TP2 — 2R", "TP3 — 3R",
                        "News — SUPPORT", "Time Machine — ALLOW",
                        "Volume — STRONG", "class='rr'"):
             self.assertIn(needle, html)
+
+    def test_direction_shows_as_call_put(self):
+        """Trade direction is shown as CALL (green) / PUT (red), never
+        long/short — display only, internal values stay long/short."""
+        from web import app as app_mod
+        from bhanu import signal as signal_mod
+        self.assertEqual(
+            app_mod._opt("long"), "<span class='opt-call'>CALL</span>")
+        self.assertEqual(
+            app_mod._opt("short"), "<span class='opt-put'>PUT</span>")
+        self.assertEqual(app_mod._opt_text("long"), "CALL")
+        self.assertEqual(app_mod._opt_text("short"), "PUT")
+        self.assertEqual(signal_mod.opt_label("long"), "CALL")
+        self.assertEqual(signal_mod.opt_label("short"), "PUT")
+        sig = {"decision": "HALF SIZE", "symbol": "NIFTY",
+               "direction": "short", "summary": "x",
+               "entry": 25752.5, "stop": 25822.33,
+               "tp1": 25682.67, "tp2": 25612.84, "tp3": 25543.01,
+               "size_factor": 0.5, "factors": {}}
+        html = app_mod._signal_breakdown_html(sig)
+        self.assertIn("SIGNAL — NIFTY <span class='opt-put'>PUT</span>", html)
+        self.assertNotIn("short", html)
 
     def test_home_renders_fast(self):
         import time
