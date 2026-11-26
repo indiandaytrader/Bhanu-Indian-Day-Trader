@@ -1,0 +1,8 @@
+# render.yaml
+services:
+  - type: web
+    name: bhanu-indian-day-trader
+    runtime: docker
+    plan: free
+    autoDeployTrigger: off
+    healthCheckPath: /healthz
