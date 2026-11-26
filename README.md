@@ -4,7 +4,7 @@
 **An Indian market terminal for paper trading.** Follow NIFTY, BANK NIFTY and SENSEX, inspect a CALL/PUT setup, size the position and replay it before recording a paper trade. Hindi me samjho, English me trade karo.
 
 [![Python tests](https://github.com/indiandaytrader/Bhanu-Indian-Day-Trader/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/indiandaytrader/Bhanu-Indian-Day-Trader/actions/workflows/tests.yml)
-[Live demo status — repository for now](https://github.com/indiandaytrader/Bhanu-Indian-Day-Trader) · [Feature guides](docs/guides/README.md)
+[Live demo](https://bhanu-indian-day-trader.onrender.com)
 
 ## Open the terminal
 
@@ -49,7 +49,7 @@ These screenshots show the running dashboard. The two-second index poll can retu
 
 [![Set up on Railway](https://railway.com/button.svg)](https://railway.com/new)
 
-**Railway requires repository selection.** Choose **Deploy from GitHub repo** and select [indiandaytrader/Bhanu-Indian-Day-Trader](https://github.com/indiandaytrader/Bhanu-Indian-Day-Trader). No Railway template has been published. Use one instance per ledger, mount persistent storage at `/app/data` and keep private paper ledgers access-controlled. A hosted demo URL is pending deployment.
+**Railway requires repository selection.** Choose **Deploy from GitHub repo** and select [indiandaytrader/Bhanu-Indian-Day-Trader](https://github.com/indiandaytrader/Bhanu-Indian-Day-ader). No Railway template has been published. Use one instance per ledger, mount persistent storage at `/app/data` and keep private paper ledgers access-controlled. Live demo: https://bhanu-indian-day-trader.onrender.com
 
 ## Tests
 
