@@ -1351,6 +1351,44 @@ class TestLiveRefresh(unittest.TestCase):
                      app_mod.skills_page("en")):
             self.assertNotIn("bhanu-live-indicator", html)
 
+    def test_nav_matches_screenshot(self):
+        """Top nav stays exactly as the screenshot: plain blue
+        underlined links with " | " separators, in this order — never
+        buttons, pills or a dark navbar. Blue + readable in both
+        themes (WCAG AA contrast)."""
+        import re
+        from web import app as app_mod
+        want = ["home", "ORB Scanner", "Levels", "Sectors", "Option Chain",
+                "Sizing", "Paper Trading", "Skills", "Time Machine",
+                "EN", "HI"]
+        for lang in ("en", "hi"):
+            html = app_mod.home(lang)
+            nav = re.search(r"<nav>(.*?)</nav>", html, re.S).group(1)
+            labels = re.findall(r"<a[^>]*>([^<]+)</a>", nav)
+            self.assertEqual(labels, want)
+            self.assertEqual(nav.count(" | "), 9)
+        page = app_mod._page("en", "x", "")
+        css = re.search(r"<style>(.*?)</style>", page, re.S).group(1)
+        self.assertIn("nav a{color:var(--accent)}", css)
+        self.assertIn("--accent:#2962ff", css)   # light theme blue
+        self.assertIn("--accent:#7aa2ff", css)   # dark theme blue
+        # No button/pill styling on the nav links, and no rule that
+        # would remove their underline.
+        self.assertNotIn("text-decoration:none", css)
+
+        def _lum(hexs):
+            r, g, b = (int(hexs[i:i + 2], 16) / 255 for i in (1, 3, 5))
+            f = lambda c: c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+            r, g, b = f(r), f(g), f(b)
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+        def _contrast(fg, bg):
+            l1, l2 = sorted((_lum(fg), _lum(bg)), reverse=True)
+            return (l1 + 0.05) / (l2 + 0.05)
+
+        self.assertGreaterEqual(_contrast("#2962ff", "#f7f8fa"), 4.5)
+        self.assertGreaterEqual(_contrast("#7aa2ff", "#121417"), 4.5)
+
     def test_live_js_handles_hidden_tab_failure_and_retry(self):
         from web import app as app_mod
         js = app_mod._live_js()
@@ -1381,6 +1419,37 @@ class TestLiveRefresh(unittest.TestCase):
         self.assertNotIn("Market Lab", app_mod._live_js())
         self.assertNotIn("Market Lab", app_mod._chart_js())
 
+    def test_home_line_chart_calls_come_after_definition(self):
+        """Regression: the 3 home intraday charts were blank because
+        ``bhanuLazyLine`` was called from an inline <script> inside
+        each card body — which runs during parsing, BEFORE ``_chart_js``
+        defines the function, so it threw ReferenceError and the fetch
+        never started. The calls must live in the scripts section,
+        after the definition, and the card must carry no inline script."""
+        from web import app as app_mod
+        html = app_mod.home("en")
+        definition = html.find("function bhanuLazyLine")
+        self.assertGreater(definition, 0)
+        for cid, symbol in (("chart-nifty", "^NSEI"),
+                            ("chart-bank", "^NSEBANK"),
+                            ("chart-sensex", "^BSESN")):
+            call = html.find(f"bhanuLazyLine('{cid}', '{symbol}')")
+            self.assertGreater(call, 0, f"missing lazy call for {cid}")
+            self.assertGreater(call, definition,
+                               f"call for {cid} runs before the function is defined")
+        block = app_mod._line_chart_block("chart-nifty", "NIFTY 50", "^NSEI")
+        self.assertNotIn("<script>", block)
+        self.assertIn("Chart load ho raha hai", block)
+
+    def test_lazy_line_fetch_has_timeout(self):
+        """A hung intraday fetch must fail (so the retry loop runs)
+        instead of leaving "loading" forever."""
+        from web import app as app_mod
+        js = app_mod._chart_js()
+        self.assertIn("AbortController", js)
+        self.assertIn("bhanuFetchJson", js)
+        self.assertIn("request timed out", js)
+
     def test_api_intraday_failure_is_honest(self):
         from unittest.mock import patch
         from web import app as app_mod
@@ -1391,6 +1460,100 @@ class TestLiveRefresh(unittest.TestCase):
             out = app_mod._api_intraday({"symbol": ["^NSEI"]})
         self.assertEqual(out["line"], [])
         self.assertIn("403", out["error"])
+
+
+class TestTableOverflow(unittest.TestCase):
+    """Wide tables must never spill out of their card: every table
+    sits in a .table-wrap (horizontal scroll inside the box) with a
+    fixed layout, and long cell text wraps instead of widening it."""
+
+    def test_table_wrap_css(self):
+        from web import app as app_mod
+        page = app_mod._page("en", "x", "")
+        css = page[page.find("<style>"):page.find("</style>")]
+        self.assertIn(".table-wrap{overflow-x:auto", css)
+        self.assertIn(".table-wrap>table{table-layout:fixed", css)
+        self.assertIn("overflow-wrap:break-word", css)
+        self.assertIn("box-sizing:border-box", css)
+
+    def test_levels_table_stays_in_its_box(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        row = {"symbol": "NIFTY", "price": 25748.0,
+               "nearest_support": 25650.0, "nearest_resistance": 25800.0,
+               "pdh": 25800.0, "pdl": 25550.0,
+               "entry": 25730.0, "stop": 25822.33, "atr_stop": 25793.17,
+               "target": 25785.0, "signal": "short"}
+        with patch.object(levels_mod, "scan_levels",
+                          return_value={"run_at_ist": "2026-11-26 13:00:00 IST",
+                                        "levels": [row], "failed": []}):
+            out = app_mod._api_levels({}, "en")
+        html = out["html"]
+        self.assertIn("table-wrap", html)
+        self.assertIn("<colgroup>", html)
+        # Narrow screens: the table keeps a readable minimum width and
+        # scrolls inside its wrapper instead of crushing to letters.
+        self.assertIn("min-width:720px", html)
+        # The long SL text wraps inside its cell, it does not widen
+        # the table: it is present and inside the wrapped table.
+        self.assertIn("25,822.33 (1.5x ATR 25,793.17)", html)
+        self.assertLess(html.find("table-wrap"), html.find("<table"))
+
+    def test_orb_table_stays_in_its_box(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        scan = {
+            "scan": "orb", "run_at_ist": "2026-11-26 12:00:00 IST",
+            "fetched": 39, "usable": 38,
+            "hits": [{"symbol": "NIFTY", "yahoo_symbol": "^NSEI",
+                      "direction": "long", "close": 25730.0,
+                      "bar_time": "09:35", "range_high": 25718.0,
+                      "range_low": 25687.0}],
+            "failed": [], "hit_count": 1,
+            "as_of": "2026-11-26 12:00:00 IST",
+        }
+        with patch.object(app_mod, "_orb_scan", return_value=scan):
+            out = app_mod._api_orb({}, "en")
+        self.assertIn("table-wrap", out["html"])
+        self.assertIn("<colgroup>", out["html"])
+        self.assertIn("min-width:600px", out["html"])
+        self.assertLess(out["html"].find("table-wrap"),
+                        out["html"].find("<table"))
+
+    def test_paper_tables_stay_in_their_boxes(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        with patch.object(paper_mod, "list_positions", return_value=[]), \
+             patch.object(paper_mod, "list_trades", return_value=[]), \
+             patch.object(paper_mod, "day_summary",
+                          return_value={"trades": 0, "realised_pnl": 0.0,
+                                        "risk_taken": 0.0, "flat": True}):
+            html = app_mod.paper_page("en")
+        # Open positions + exit check + closed trades: all three wrapped.
+        # (Count the divs, not the word — the page CSS also mentions it.)
+        self.assertEqual(html.count("class='table-wrap'"), 3)
+
+    def test_chain_and_skills_tables_stay_in_their_boxes(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        from bhanu import options as options_mod
+        chain = {"underlying": 25800.0, "atm": 25800, "pcr": 1.0,
+                 "ce_oi": 1000, "pe_oi": 1000,
+                 "strikes": [{"strike": 25800,
+                              "ce": {"lastPrice": 100.0, "openInterest": 1000},
+                              "pe": {"lastPrice": 90.0, "openInterest": 900}}]}
+        with patch.object(options_mod, "fetch_chain", return_value=chain):
+            html = app_mod.chain_page("en", {"symbol": ["NIFTY"]})
+        self.assertIn("table-wrap", html)
+        html = app_mod.skills_page("en")
+        self.assertIn("table-wrap", html)
+        self.assertIn("<colgroup>", html)
+
+    def test_sector_and_mc_tables_wrapped_in_chart_js(self):
+        from web import app as app_mod
+        js = app_mod._chart_js()
+        self.assertIn('class="table-wrap"><table>', js)
+        self.assertIn('<div class="table-wrap"><table>', js)
 
 
 class TestPerformance(unittest.TestCase):

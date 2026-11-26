@@ -149,11 +149,15 @@ html[data-theme="dark"]{{--bg:#121417;--card:#1c1f24;--text:#e8e8e8;--muted:#9aa
 body{{font-family:system-ui,sans-serif;max-width:1020px;margin:24px auto;padding:0 16px;
 line-height:1.5;background:var(--bg);color:var(--text)}}
 table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid var(--border);
-padding:6px 8px;text-align:left}}th{{background:var(--th)}}
+padding:6px 8px;text-align:left;overflow-wrap:break-word}}th{{background:var(--th)}}
+.table-wrap{{overflow-x:auto;max-width:100%;box-sizing:border-box}}
+.table-wrap>table{{table-layout:fixed;width:100%}}
+pre{{overflow-x:auto;max-width:100%;box-sizing:border-box}}
 .up{{color:var(--up)}} .down{{color:var(--down)}} .muted{{color:var(--muted)}}
 nav{{margin-bottom:16px}} nav a{{color:var(--accent)}}
 .card{{background:var(--card);border:1px solid var(--border);border-radius:12px;
-padding:16px;margin:16px 0;box-shadow:0 1px 3px rgba(0,0,0,0.06)}}
+padding:16px;margin:16px 0;box-shadow:0 1px 3px rgba(0,0,0,0.06);
+box-sizing:border-box;max-width:100%}}
 .card h3{{margin-top:0}}
 .chart-wrap{{position:relative;width:100%}}
 .chart-box{{width:100%;height:300px}}
@@ -360,13 +364,30 @@ function bhanuSvgFlow(el, series){
   s+='</svg><p class="muted">Simple chart view — full chart library could not load.</p>';
   el.innerHTML=s;
 }
+function bhanuFetchJson(url, timeoutMs){
+  // fetch() with a timeout: a hung request must surface as an error
+  // (so the retry loop runs) instead of leaving "loading" forever.
+  if(typeof AbortController==='undefined'){
+    return fetch(url).then(function(r){
+      if(!r.ok){throw new Error('http '+r.status);}return r.json();
+    });
+  }
+  var ctrl=new AbortController();
+  var timer=setTimeout(function(){ctrl.abort();},timeoutMs||20000);
+  return fetch(url,{signal:ctrl.signal}).then(function(r){
+    clearTimeout(timer);
+    if(!r.ok){throw new Error('http '+r.status);}return r.json();
+  }).catch(function(e){
+    clearTimeout(timer);
+    if(e&&e.name==='AbortError'){throw new Error('request timed out');}
+    throw e;
+  });
+}
 function bhanuLineRender(id, p, symbol){
   var el=document.getElementById(id);if(!el)return;
   if(!p||!p.line||p.line.length===0){bhanuUnavailable(el,p&&p.error?p.error:'no price data');return;}
   var fetchLine=function(){
-    return fetch('/api/intraday?symbol='+encodeURIComponent(symbol)).then(function(r){
-      if(!r.ok){throw new Error('intraday '+r.status);}return r.json();
-    }).then(function(p2){
+    return bhanuFetchJson('/api/intraday?symbol='+encodeURIComponent(symbol)).then(function(p2){
       if(!p2||p2.error||!p2.line||!p2.line.length){throw new Error(p2&&p2.error?p2.error:'no line data');}
       return p2;
     });
@@ -395,9 +416,7 @@ function bhanuLazyLine(id, symbol){
   var el=document.getElementById(id);if(!el)return;
   if(el.dataset.bhanuLoaded==='1'){return;}
   el.innerHTML='<p class="loading">Chart load ho raha hai…</p>';
-  fetch('/api/intraday?symbol='+encodeURIComponent(symbol)).then(function(r){
-    if(!r.ok){throw new Error('intraday '+r.status);}return r.json();
-  }).then(function(p){
+  bhanuFetchJson('/api/intraday?symbol='+encodeURIComponent(symbol)).then(function(p){
     if(!p||p.error||!p.line||!p.line.length){throw new Error(p&&p.error?p.error:'no price data');}
     el.innerHTML='';
     el.dataset.bhanuLoaded='1';
@@ -491,12 +510,12 @@ function bhanuSectorRender(id, p){
   el.innerHTML=svg;
   var list=document.getElementById(id+'-list');
   if(list){
-    var html='<table><tr><th>Sector</th><th>% change</th><th>vs NIFTY</th><th>Stocks</th><th></th></tr>';
+    var html='<div class="table-wrap"><table><tr><th>Sector</th><th>% change</th><th>vs NIFTY</th><th>Stocks</th><th></th></tr>';
     p.sectors.forEach(function(s){
       var w=Math.min(100,Math.abs(s.change_pct)*40);
       html+='<tr><td>'+s.name+'</td><td class="'+(s.up?'up':'down')+'">'+(s.change_pct>=0?'+':'')+s.change_pct.toFixed(2)+'%</td><td>'+(s.rel_pct===null?'—':((s.rel_pct>=0?'+':'')+s.rel_pct.toFixed(2)+'%'))+'</td><td>'+s.stocks+'</td><td style="width:35%"><div class="sector-bar'+(s.up?'':' down')+'" style="width:'+w+'%"></div></td></tr>';
     });
-    list.innerHTML=html+'</table><p class="muted">Bubble size = today\\'s traded value (close × volume). NIFTY change: '+(p.nifty_change===null||p.nifty_change===undefined?'—':p.nifty_change.toFixed(2)+'%')+'. As of '+p.as_of+'.</p>';
+    list.innerHTML=html+'</table></div><p class="muted">Bubble size = today\\'s traded value (close × volume). NIFTY change: '+(p.nifty_change===null||p.nifty_change===undefined?'—':p.nifty_change.toFixed(2)+'%')+'. As of '+p.as_of+'.</p>';
   }
   return true;
 }
@@ -700,7 +719,7 @@ function bhanuMCHistHTML(hist){
   });
   var avg='';
   if(hist.avg_r!==null&&hist.avg_r!==undefined){avg='<p>Average outcome across all '+hist.n.toLocaleString('en-IN')+' replays: <b>'+(hist.avg_r>=0?'+':'')+hist.avg_r.toFixed(2)+'R</b> (the bar the average sits in is the typical replay).</p>';}
-  return '<h3>Monte Carlo distribution — '+hist.n.toLocaleString('en-IN')+' replays</h3><p class="muted">Each replay ran the setup on resampled 5m bars from the last 60 days. This is how the 10,000 checks split up:</p><table>'+rows+'</table>'+avg;
+  return '<h3>Monte Carlo distribution — '+hist.n.toLocaleString('en-IN')+' replays</h3><p class="muted">Each replay ran the setup on resampled 5m bars from the last 60 days. This is how the 10,000 checks split up:</p><div class="table-wrap"><table>'+rows+'</table></div>'+avg;
 }
 function bhanuMCRender(mc){
   var hist=document.getElementById('mc-hist');
@@ -817,12 +836,19 @@ def _line_chart_block(chart_id: str, label: str, yahoo_symbol: str,
                       height: int = 260) -> str:
     """A line-chart card, loaded lazily: the page renders instantly
     with a "loading" state and ``bhanuLazyLine`` fetches the data from
-    /api/intraday — no Yahoo fetch ever blocks a page render."""
+    /api/intraday — no Yahoo fetch ever blocks a page render.
+
+    NOTE: the card carries NO inline <script>. The ``bhanuLazyLine``
+    call lives in the page's scripts section, AFTER ``_chart_js()``
+    defines it. An inline call here used to execute during parsing,
+    before the function existed — a ReferenceError, so the fetch never
+    started and the card sat on "Chart load ho raha hai…" forever
+    while the rest of the page worked (that exact bug left the 3 home
+    intraday charts blank)."""
     return (
         f"<div class='card'><h3>{_esc(label)} — intraday</h3>"
         f"<div id='{chart_id}' class='chart-box' style='height:{height}px'>"
-        f"<p class='loading'>Chart load ho raha hai…</p></div>"
-        f"<script>bhanuLazyLine('{chart_id}', '{yahoo_symbol}');</script></div>"
+        f"<p class='loading'>Chart load ho raha hai…</p></div></div>"
     )
 
 
@@ -882,7 +908,7 @@ def _mc_histogram_svg(hist: dict) -> str:
         f"<h3>Monte Carlo distribution — {n:,} replays</h3>"
         f"<p class='muted'>Each replay ran today's setup on resampled 5m bars "
         f"from the last 60 days. This is how the 10,000 checks split up:</p>"
-        f"<table>{rows}</table>{avg_line}"
+        f"<div class='table-wrap'><table>{rows}</table></div>{avg_line}"
     )
 
 
@@ -1004,8 +1030,11 @@ def _orb_table_html(result: dict, lang: str, limit: int = 50) -> str:
         f"hits {len(result.get('hits', []))} (as of {_esc(result.get('as_of', ''))}). "
         f"A hit is the first completed 5m bar that CLOSES above/below the 09:15–09:30 range — "
         f"wicks do not count, and a hit is stale once the price has moved on.</p>"
-        f"<table><tr><th>Symbol</th><th>Direction</th><th>Close</th><th>Bar</th>"
-        f"<th>Range high – low</th><th>TP1 / TP2 / TP3</th></tr>{rows}</table>{failed_html}{more_html}</div>"
+        f"<div class='table-wrap'><table style='min-width:600px'>"
+        f"<colgroup><col style='width:14%'><col style='width:12%'><col style='width:16%'>"
+        f"<col style='width:14%'><col style='width:20%'><col style='width:24%'></colgroup>"
+        f"<tr><th>Symbol</th><th>Direction</th><th>Close</th><th>Bar</th>"
+        f"<th>Range high – low</th><th>TP1 / TP2 / TP3</th></tr>{rows}</table></div>{failed_html}{more_html}</div>"
     )
 
 
@@ -1050,11 +1079,16 @@ def home(lang: str) -> str:
     except Exception as exc:  # noqa: BLE001
         paper_html = f"<p>{t('paper_trading')}: unavailable ({_esc(exc)})</p>"
 
-    # (a) Index intraday charts — lazy, one card per index.
+    # (a) Index intraday charts — lazy, one card per index. The loader
+    # calls are appended to the scripts section (after _chart_js()
+    # defines bhanuLazyLine) — never inline in the card body, or the
+    # call runs before the function exists (see _line_chart_block).
     chart_cards = ""
+    lazy_calls = ""
     for yahoo_symbol, label in (("^NSEI", "NIFTY 50"), ("^NSEBANK", "BANK NIFTY"), ("^BSESN", "SENSEX")):
         cid = "chart-" + label.split()[0].lower().replace(" ", "")
         chart_cards += _line_chart_block(cid, label, yahoo_symbol)
+        lazy_calls += f"bhanuLazyLine('{cid}', '{yahoo_symbol}');"
 
     # (b) Smart Money Flow — all stocks' intraday % change on one chart.
     flow_html = (
@@ -1094,7 +1128,7 @@ def home(lang: str) -> str:
         head_extra=_chart_lib_tag(),
         scripts=_chart_js()
         + f"<script>bhanuFlowChart('flow-chart');bhanuSectorMap('sector-map');"
-          f"bhanuQuoteRefresh();bhanuNewsRefresh('{lang}');bhanuOrbHitsFetch();</script>",
+          f"bhanuQuoteRefresh();bhanuNewsRefresh('{lang}');bhanuOrbHitsFetch();{lazy_calls}</script>",
         live=True,
     )
 
@@ -1323,9 +1357,14 @@ def _levels_table_html(result: dict, lang: str) -> str:
         f"<div class='card'>{switch_html}"
         f"<p>As of {_esc(result.get('run_at_ist', ''))}. One row per index — "
         f"enter here, exit here, support here, resistance here.</p>"
-        f"<table><tr><th>Symbol</th><th>Price</th><th>Nearest Support</th>"
+        f"<div class='table-wrap'><table style='min-width:720px'>"
+        f"<colgroup><col style='width:8%'><col style='width:8%'><col style='width:9%'>"
+        f"<col style='width:9%'><col style='width:8%'><col style='width:8%'>"
+        f"<col style='width:8%'><col style='width:12%'><col style='width:8%'>"
+        f"<col style='width:7%'><col style='width:7%'><col style='width:8%'></colgroup>"
+        f"<tr><th>Symbol</th><th>Price</th><th>Nearest Support</th>"
         f"<th>Nearest Resistance</th><th>PDH</th><th>PDL</th><th>ORB Entry</th>"
-        f"<th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Signal</th></tr>{body_rows}</table>"
+        f"<th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Signal</th></tr>{body_rows}</table></div>"
         f"{failed_html}{note}</div>"
     )
 
@@ -1403,8 +1442,11 @@ def skills_page(lang: str) -> str:
     )
     body = (
         f"<div class='card'><p>{len(rows)} skills — what each does, where it shows, and its live status right now.</p>"
-        f"<table><tr><th>DayTrader skill</th><th>Our module</th><th>What it does</th>"
-        f"<th>Shows on</th><th>Live status</th></tr>{body_rows}</table>{note}</div>"
+        f"<div class='table-wrap'><table>"
+        f"<colgroup><col style='width:16%'><col style='width:14%'><col style='width:34%'>"
+        f"<col style='width:16%'><col style='width:20%'></colgroup>"
+        f"<tr><th>DayTrader skill</th><th>Our module</th><th>What it does</th>"
+        f"<th>Shows on</th><th>Live status</th></tr>{body_rows}</table></div>{note}</div>"
         f"{_news_feed_html(lang)}"
     )
     return _page(lang, t("skills"), body)
@@ -1446,10 +1488,10 @@ def _timemachine_body(data: dict) -> str:
             f"<p id='mc-setup'>{_esc(mc.get('symbol', ''))} {_esc(mc.get('direction', ''))} "
             f"entry {_fmt(mc.get('entry'))}, stop {_fmt(mc.get('stop'))}, "
             f"target {_fmt(mc.get('target'))}.</p>"
-            f"<table><tr><th>Outcome</th><th>Share</th></tr>"
+            f"<div class='table-wrap'><table><tr><th>Outcome</th><th>Share</th></tr>"
             f"<tr><td>Target first (win)</td><td id='mc-target-pct'>{mc['target_first_pct']:.1f}%</td></tr>"
             f"<tr><td>Stop first (loss)</td><td id='mc-stop-pct'>{mc['stop_first_pct']:.1f}%</td></tr>"
-            f"<tr><td>Neither (flat by 15:15)</td><td id='mc-neither-pct'>{mc['neither_pct']:.1f}%</td></tr></table>"
+            f"<tr><td>Neither (flat by 15:15)</td><td id='mc-neither-pct'>{mc['neither_pct']:.1f}%</td></tr></table></div>"
             f"<p id='mc-summary'>Average outcome: {mc['avg_r']:+.2f}R. Best case (target hit): "
             f"+{mc['best_case_r']:.1f}R. Worst case (stop hit): {mc['worst_case_r']:.1f}R. "
             f"Verdict: {mc['verdict']} (break-even {mc['break_even_pct']:.1f}% "
@@ -1471,12 +1513,12 @@ def _timemachine_body(data: dict) -> str:
             f"<p>Risk gate: <b>{tc['gate_verdict']}</b>"
             + (f" — {_esc(tc['gate_reason'])}" if tc.get("gate_reason") and tc["gate_reason"] != "ok" else "")
             + f". Sizing: {tc['sizing_verdict']} — {_esc(tc['sizing_reason'])}.</p>"
-            f"<table><tr><th>Four limits (max units)</th><th>Units</th></tr>"
+            f"<div class='table-wrap'><table><tr><th>Four limits (max units)</th><th>Units</th></tr>"
             f"<tr><td>Max loss/trade (₹500 / risk per unit)</td><td>{lim['max_loss']}</td></tr>"
             f"<tr><td>Position cap (75% of budget / entry)</td><td>{lim['position_cap']}</td></tr>"
             f"<tr><td>Max order (₹80,000 / entry)</td><td>{lim['max_order']}</td></tr>"
             f"<tr><td>Cash buffer (90% of budget / entry)</td><td>{lim['cash_buffer']}</td></tr>"
-            f"<tr><td><b>Binding limit → qty</b></td><td><b>{tc['qty']}</b> ({_esc(tc.get('binding_limit', ''))})</td></tr></table>"
+            f"<tr><td><b>Binding limit → qty</b></td><td><b>{tc['qty']}</b> ({_esc(tc.get('binding_limit', ''))})</td></tr></table></div>"
             f"<p>Entry {_fmt(tc.get('entry'))}, stop {_fmt(tc.get('stop'))}, "
             f"target {_fmt(tc.get('target'))}, R:R {tc['rr']:.2f}. "
             f"Position value ₹{tc['position_value']:,.2f}, max loss at stop "
@@ -1510,8 +1552,8 @@ def _timemachine_body(data: dict) -> str:
         bt_html = (
             f"<div class='card'><h3>ORB backtest — NIFTY 5m ({_esc(bt.get('first_day', '?'))} to "
             f"{_esc(bt.get('last_day', '?'))}, {_esc(bt.get('sessions', '?'))} full sessions)</h3>"
-            f"<table><tr><th>Direction</th><th>Fires</th><th>Target wins</th>"
-            f"<th>Stop losses</th><th>Neither</th><th>Avg R</th></tr>{bt_rows}</table>"
+            f"<div class='table-wrap'><table><tr><th>Direction</th><th>Fires</th><th>Target wins</th>"
+            f"<th>Stop losses</th><th>Neither</th><th>Avg R</th></tr>{bt_rows}</table></div>"
             f"<p class='muted'>History replay on real bars (range-midpoint stop, "
             f"2R target, flat 15:15; no fees/slippage). Small sample, and the "
             f"period was a strong uptrend — do not read this as a general edge. "
@@ -1574,8 +1616,8 @@ def chain_page(lang: str, query: dict) -> str:
         f"<p>Underlying: {summary.get('underlying')} | ATM: {summary.get('atm')} | "
         f"PCR (PE OI / CE OI): {summary.get('pcr')} | "
         f"CE OI: {summary.get('ce_oi')} | PE OI: {summary.get('pe_oi')}</p>"
-        f"<table><tr><th>Strike</th><th>CE LTP</th><th>CE OI</th>"
-        f"<th>PE LTP</th><th>PE OI</th></tr>{rows}</table>"
+        f"<div class='table-wrap'><table><tr><th>Strike</th><th>CE LTP</th><th>CE OI</th>"
+        f"<th>PE LTP</th><th>PE OI</th></tr>{rows}</table></div>"
     )
     return _page(lang, f"{t('option_chain')} — {symbol}", body)
 
@@ -1669,19 +1711,19 @@ def paper_page(lang: str) -> str:
             )
     exit_html = (
         "<h3>Exit check — fresh news on open positions</h3>"
-        "<table><tr><th>ID</th><th>Symbol</th><th>Dir</th>"
+        "<div class='table-wrap'><table><tr><th>ID</th><th>Symbol</th><th>Dir</th>"
         "<th>Action</th><th>Why</th></tr>"
-        f"{exit_rows or '<tr><td colspan=5>no open positions</td></tr>'}</table>"
+        f"{exit_rows or '<tr><td colspan=5>no open positions</td></tr>'}</table></div>"
     )
     body = (
         f"<p>Today: {summary.get('trades', 0)} trade(s), realised "
         f"₹{summary.get('realised_pnl', 0):,.2f}, risk taken "
         f"₹{summary.get('risk_taken', 0):,.2f}, flat: {summary.get('flat')}</p>"
-        f"<h3>Open positions</h3><table><tr><th>ID</th><th>Symbol</th><th>Dir</th>"
-        f"<th>Qty</th><th>Entry</th><th>Stop</th><th>Target</th></tr>{pos_rows or '<tr><td colspan=7>none</td></tr>'}</table>"
+        f"<h3>Open positions</h3><div class='table-wrap'><table><tr><th>ID</th><th>Symbol</th><th>Dir</th>"
+        f"<th>Qty</th><th>Entry</th><th>Stop</th><th>Target</th></tr>{pos_rows or '<tr><td colspan=7>none</td></tr>'}</table></div>"
         f"{exit_html}"
-        f"<h3>Closed trades</h3><table><tr><th>ID</th><th>Symbol</th><th>Dir</th>"
-        f"<th>Exit</th><th>P&amp;L</th><th>Reason</th></tr>{tr_rows or '<tr><td colspan=6>none</td></tr>'}</table>"
+        f"<h3>Closed trades</h3><div class='table-wrap'><table><tr><th>ID</th><th>Symbol</th><th>Dir</th>"
+        f"<th>Exit</th><th>P&amp;L</th><th>Reason</th></tr>{tr_rows or '<tr><td colspan=6>none</td></tr>'}</table></div>"
     )
     return _page(lang, t("paper_trading"), body)
 
