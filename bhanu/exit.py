@@ -2,7 +2,7 @@
 
 Original code, written from the rules in the DayTrader study note
 (``~/workspace/goals/trading-knowledge-research/files/DAY_TRADER_SKILL_STUDY.md``).
-No code was copied from the day-trader-skill repo or from Market Lab.
+No code was copied from the day-trader-skill repo.
 
 Rules
 -----

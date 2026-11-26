@@ -3,9 +3,11 @@
 Stdlib-only HTTP server (no framework). Pages:
   /         home — index quotes + paper summary + latest news (NIFTY)
   /orb      ORB scanner (09:15-09:30 IST range, close-confirmation)
+  /levels   live support/resistance + ORB entry/SL/TP per index
   /chain    Nifty / Bank Nifty option chain with OI + PCR
   /sizing   position sizing calculator (four limits, budget is an input)
   /paper    paper trading ledger
+  /skills   all 11 DayTrader skills — what each does + live status
 
 Data is fetched live (Yahoo / NSE) with short caching. When a source is
 unavailable the page says so plainly — no fake data is ever shown.
@@ -27,10 +29,12 @@ from zoneinfo import ZoneInfo
 from bhanu import config as config_mod
 from bhanu import data as data_mod
 from bhanu import i18n as i18n_mod
+from bhanu import levels as levels_mod
 from bhanu import options as options_mod
 from bhanu import paper as paper_mod
 from bhanu import scanner as scanner_mod
 from bhanu import sizing as sizing_mod
+from bhanu import skills as skills_mod
 from bhanu import news as news_mod
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -65,9 +69,11 @@ def _page(lang: str, title: str, body: str) -> str:
     nav = (
         f'<a href="/?lang={lang}">{t("home")}</a> | '
         f'<a href="/orb?lang={lang}">{t("orb_scanner")}</a> | '
+        f'<a href="/levels?lang={lang}">{t("levels")}</a> | '
         f'<a href="/chain?lang={lang}">{t("option_chain")}</a> | '
         f'<a href="/sizing?lang={lang}">{t("sizing")}</a> | '
         f'<a href="/paper?lang={lang}">{t("paper_trading")}</a> | '
+        f'<a href="/skills?lang={lang}">{t("skills")}</a> | '
         f'<a href="?lang=en">EN</a> <a href="?lang=hi">HI</a>'
     )
     return f"""<!DOCTYPE html>
@@ -179,6 +185,91 @@ def orb_page(lang: str) -> str:
         f"<th>Range high – low</th></tr>{rows}</table>{failed_html}"
     )
     return _page(lang, t("orb_scanner"), body)
+
+
+def levels_page(lang: str) -> str:
+    t = lambda k: i18n_mod.t(k, lang)
+    try:
+        result = _cached("levels", 60, levels_mod.scan_levels)
+    except Exception as exc:  # noqa: BLE001
+        return _page(lang, t("levels"), f"<p>levels unavailable: {_esc(exc)}</p>")
+    rows = result.get("levels", [])
+    failed = result.get("failed", [])
+
+    def _fmt(value) -> str:
+        return f"{value:,.2f}" if value is not None else "—"
+
+    def _sl(row: dict) -> str:
+        stop = row.get("stop")
+        if stop is None:
+            return "—"
+        atr_stop = row.get("atr_stop")
+        if atr_stop is not None:
+            return f"{stop:,.2f} (1.5x ATR {_fmt(atr_stop)})"
+        return f"{stop:,.2f}"
+
+    body_rows = "".join(
+        f"<tr><td>{_esc(r.get('symbol', ''))}</td><td>{_fmt(r.get('price'))}</td>"
+        f"<td>{_fmt(r.get('nearest_support'))}</td><td>{_fmt(r.get('nearest_resistance'))}</td>"
+        f"<td>{_fmt(r.get('pdh'))}</td><td>{_fmt(r.get('pdl'))}</td>"
+        f"<td>{_fmt(r.get('entry'))}</td><td>{_sl(r)}</td>"
+        f"<td>{_fmt(r.get('target'))}</td><td>{_esc(r.get('signal') or 'None')}</td></tr>"
+        for r in rows
+    )
+    failed_html = ""
+    if failed:
+        failed_html = "<p class='muted'>Not computed (partial coverage): " + ", ".join(
+            _esc(f"{f['symbol']}: {f['reason']}") for f in failed
+        ) + "</p>"
+    note = (
+        "<p class='muted'>Levels come from Yahoo 5m bars (last 5 sessions) + "
+        "daily bars — public, delayed, a proxy; verify on the live platform "
+        "before any order. Support/resistance = recent swing highs/lows, "
+        "previous-day high/low (PDH/PDL) and today's 09:15-09:30 opening range. "
+        "ORB entry = first completed 5m bar closing outside the range; "
+        "SL = range midpoint (1.5x ATR stop shown alongside); TP = 2R; flat by "
+        "15:15 IST. A signal is stale once the price has moved on. "
+        "The NSE option chain is often blocked (HTTP 403) — no chain data is "
+        "faked here; see /chain.</p>"
+    )
+    body = (
+        f"<p>As of {_esc(result.get('run_at_ist', ''))}. One row per index — "
+        f"enter here, exit here, support here, resistance here.</p>"
+        f"<table><tr><th>Symbol</th><th>Price</th><th>Nearest Support</th>"
+        f"<th>Nearest Resistance</th><th>PDH</th><th>PDL</th><th>ORB Entry</th>"
+        f"<th>SL</th><th>TP</th><th>Signal</th></tr>{body_rows}</table>"
+        f"{failed_html}{note}"
+    )
+    return _page(lang, t("levels"), body)
+
+
+def skills_page(lang: str) -> str:
+    t = lambda k: i18n_mod.t(k, lang)
+    try:
+        rows = _cached("skills", 120, lambda: skills_mod.collect_skill_status(live=True))
+    except Exception as exc:  # noqa: BLE001
+        return _page(lang, t("skills"), f"<p>skills unavailable: {_esc(exc)}</p>")
+    body_rows = "".join(
+        f"<tr><td>{_esc(r.get('daytrader', ''))}</td><td>{_esc(r.get('module', ''))}</td>"
+        f"<td>{_esc(r.get('does', ''))}</td><td>{_esc(r.get('shows', ''))}</td>"
+        f"<td>{_esc(r.get('status', ''))}</td></tr>"
+        for r in rows
+    )
+    note = (
+        "<p class='muted'>All 11 DayTrader skills, in one place. "
+        "trader-budget was folded into the sizing calculator (budget is an "
+        "input, not a skill of its own — Bhanu's call) and trader-pelosi was "
+        "skipped on purpose (US Congress disclosures only, no Indian "
+        "equivalent). A skill whose live data cannot be fetched says so "
+        "plainly — nothing is faked. The Monte Carlo summary is a small "
+        "replay (200 runs); the full 10,000-run check is on the CLI.</p>"
+    )
+    body = (
+        f"<p>{len(rows)} skills — what each does, where it shows, and its live status right now.</p>"
+        f"<table><tr><th>DayTrader skill</th><th>Our module</th><th>What it does</th>"
+        f"<th>Shows on</th><th>Live status</th></tr>{body_rows}</table>{note}"
+    )
+    return _page(lang, t("skills"), body)
 
 
 def chain_page(lang: str, query: dict) -> str:
@@ -302,12 +393,16 @@ class Handler(BaseHTTPRequestHandler):
                 body = home(lang)
             elif parsed.path == "/orb":
                 body = orb_page(lang)
+            elif parsed.path == "/levels":
+                body = levels_page(lang)
             elif parsed.path == "/chain":
                 body = chain_page(lang, query)
             elif parsed.path == "/sizing":
                 body = sizing_page(lang, query)
             elif parsed.path == "/paper":
                 body = paper_page(lang)
+            elif parsed.path == "/skills":
+                body = skills_page(lang)
             else:
                 body = _page(lang, "Not found", "<p>Unknown page.</p>")
                 self._send(body, 404)

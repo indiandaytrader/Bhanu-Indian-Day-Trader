@@ -238,19 +238,21 @@ def fetch_daily_bars_safe(symbol: str, days: int = 30) -> tuple[pd.DataFrame, st
         ), str(exc)
 
 
-def fetch_intraday_bars(symbol: str, interval: str = "5m") -> pd.DataFrame:
-    """Today's intraday OHLCV bars for ``symbol`` at ``interval`` (default 5m).
+def fetch_intraday_bars(symbol: str, interval: str = "5m", days: int = 1) -> pd.DataFrame:
+    """Intraday OHLCV bars for ``symbol`` at ``interval`` (default 5m).
 
-    Returns a DataFrame with the same shape as :func:`fetch_daily_bars`,
-    indexed by IST datetime. Raises :class:`DataError` on failure.
+    ``days`` sets how many sessions of bars to fetch (default 1 = today
+    only; 5 = the last 5 sessions, used for swing levels). Returns a
+    DataFrame with the same shape as :func:`fetch_daily_bars`, indexed
+    by IST datetime. Raises :class:`DataError` on failure.
     """
-    cache_key = f"intraday_{symbol}_{interval}"
+    cache_key = f"intraday_{symbol}_{interval}_{days}d"
     cached = _read_cache(cache_key, INTRADAY_CACHE_TTL)
     if cached is not None:
         return _chart_to_frame(cached, symbol)
     url = (
         f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        f"?range=1d&interval={interval}"
+        f"?range={days}d&interval={interval}"
     )
     payload = _get_json(url)
     _write_cache(cache_key, payload)

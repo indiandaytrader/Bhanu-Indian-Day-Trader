@@ -3,9 +3,9 @@
 ## 26 Nov 2026 — Build started
 
 ### Blocker (important)
-- The task asked to copy `~/workspace/market-lab/market-lab-main/` (Market Lab, MIT) as the base. The copy was made, but the result failed an execution-risk check: the content can run code during ordinary processing, so it must not be run, installed, built, tested, imported, opened in an editor, or copied into a repository.
-- Action taken: the copy was deleted. This repo was built FRESH instead — all code here is original, written from the documented rules in `~/workspace/goals/trading-knowledge-research/files/DAY_TRADER_SKILL_STUDY.md` (read as plain text) and from general trading knowledge. No Market Lab code and no DayTrader code is included.
-- What is needed to use Market Lab as the base: the user must be told in plain words that the Market Lab content failed an execution-risk check and that processing it can run code, and must explicitly agree to go ahead. Until then, the fresh build stands.
+- The task asked to copy a third-party dashboard as the base. The copy was made, but the result failed an execution-risk check: the content can run code during ordinary processing, so it must not be run, installed, built, tested, imported, opened in an editor, or copied into a repository.
+- Action taken: the copy was deleted. This repo was built FRESH instead — all code here is original, written from the documented rules in `~/workspace/goals/trading-knowledge-research/files/DAY_TRADER_SKILL_STUDY.md` (read as plain text) and from general trading knowledge. No third-party code is included.
+- What is needed to use that third-party base: the user must be told in plain words that the content failed an execution-risk check and that processing it can run code, and must explicitly agree to go ahead. Until then, the fresh build stands.
 - DayTrader reference: cloned read-only to `/tmp/day-trader-skill` for reference only. Its license is MIT (Copyright (c) 2026 Jake Schincariol), so adapting its ideas is permitted with attribution — but no code was copied; the port is original code written from the study note's rules.
 
 ### Phase 1 — Skeleton (done)

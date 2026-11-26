@@ -2,7 +2,7 @@
 
 **Free open-source NSE day-trading dashboard — made for Indian traders, in Hinglish.**
 
-Market Lab batata hai market kya kar raha hai. DayTrader (US) batata hai kab ghusna hai aur kab nikalna hai. **Bhanu Indian Day Trader dono ko jodta hai — Indian market ke liye:** Nifty 50, Bank Nifty aur Sensex par ORB scanner, option chain (OI/PCR), entry/exit signals, position sizing aur Monte Carlo check — sab ek dashboard me.
+DayTrader (US) batata hai America ke market me kab ghusna hai aur kab nikalna hai. **Bhanu Indian Day Trader wahi kaam Indian market ke liye karta hai:** Nifty 50, Bank Nifty aur Sensex par ORB scanner, option chain (OI/PCR), entry/exit signals, position sizing aur Monte Carlo check — sab ek dashboard me.
 
 **Why install it?**
 
@@ -11,6 +11,8 @@ Market Lab batata hai market kya kar raha hai. DayTrader (US) batata hai kab ghu
 - **Entry / Exit signals** — range-midpoint ya 1.5x ATR stop, 2R target, 15:15 IST tak flat
 - **Position Sizing Calculator** — chaar limits se size nikalta hai; stop door ho to NO trade
 - **Monte Carlo Time Machine** — trade ko 10,000 baar replay karke honest odds batata hai (backtest, guarantee nahi)
+- **News Tracker** — NSE/BSE announcements aur India ki taaza headlines, trade se pehle news check karo; news ke baad hi trade karo
+- **Live Support / Resistance** — Nifty / Bank Nifty / Sensex ke live support-resistance levels, PDH/PDL aur ORB range ke saath — kahan se entry, kahan se exit, sab ek jagah
 - **Hinglish interface** — Hindi me samjho, English me trade karo
 - **Paper trading by default** — pehle paper par seekho; is repo se koi real order kabhi nahi lagta
 
@@ -29,11 +31,9 @@ Ye ek free, open-source dashboard hai Indian market ke liye. Isme hai:
 - **Monte Carlo Time Machine** — trade ko 10,000 baar replay karke honest odds batata hai (backtest, guarantee nahi)
 - **Paper Trading** — pehle paper par, real money kabhi nahi (is repo se koi real order nahi lagta)
 
-## What is new vs Market Lab?
+## DayTrader se kya alag hai?
 
-This repo started from the ideas of [Market Lab](https://github.com/heysanjeevv/market-lab) (free NSE dashboard) and [DayTrader](https://github.com/JakesChincariol/day-trader-skill) (11 Claude skills for US day trading). Market Lab has no live entry/exit signals, no option chain, no position sizing and no Monte Carlo check. This repo adds all of those, adapted for NSE (IST clock, 09:15 open, 15:15 flat, Nifty/Bank Nifty/Sensex only, CE/PE options).
-
-**Note on the base:** the Market Lab source copy failed an execution-risk check during this build, so this repo was written fresh instead of copying Market Lab's code. The ideas are credited below; no Market Lab code is included.
+This repo adapts [DayTrader](https://github.com/JakesChincariol/day-trader-skill) (11 Claude skills for US day trading) for the Indian market — NSE (IST clock, 09:15 open, 15:15 flat, Nifty/Bank Nifty/Sensex only, CE/PE options), plus an option chain with OI/PCR, live support/resistance levels, and a Hinglish interface. All code here is written fresh for NSE; no DayTrader code is copied.
 
 ## The 11 DayTrader skills — NSE port
 
@@ -83,7 +83,7 @@ Then open http://localhost:8810.
 
 ## Where it runs (kahan chalega?)
 
-- **Apne PC par (Windows / Mac / Linux)** — bilkul Market Lab ki tarah: Python install karo, `run.bat` (Windows) ya `bash run.sh` chalao, aur browser me http://localhost:8810 kholo. Jab tak window khuli hai, dashboard chalta hai.
+- **Apne PC par (Windows / Mac / Linux)** — Python install karo, `run.bat` (Windows) ya `bash run.sh` chalao, aur browser me http://localhost:8810 kholo. Jab tak window khuli hai, dashboard chalta hai.
 - **Docker / cloud par** — `docker compose up --build` se kisi bhi server (VPS, Render, Railway) par chalao. Ek baar cloud par chal gaya to link kahi se bhi khul jayega — 24x7.
 - **Mobile par** — dashboard ek web page hai. Cloud par host karo (upar wala tareeka), phir phone ke browser me wahi link kholo — mobile par bhi chalega. Phone par seedha install karna (Termux/Android) mushkil hai; cloud link hi asaan rasta hai.
 
@@ -117,9 +117,8 @@ Caveats: only 20 sessions (small sample), and the period was a strong uptrend, w
 
 ## Credits
 
-- Market Lab by Sanjeev (heysanjeevv/market-lab, MIT) — the original free NSE dashboard idea.
 - DayTrader skill by Jake Schincariol (JakesChincariol/day-trader-skill, MIT) — the 11-skill pipeline, ORB close-confirmation, four-limit sizing, Monte Carlo time machine and risk-gate ideas, adapted here for NSE.
-- Both are MIT-licensed; see LICENSE.
+- MIT-licensed; see LICENSE.
 
 ## License
 

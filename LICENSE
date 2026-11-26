@@ -24,9 +24,6 @@ SOFTWARE.
 
 Attribution — ideas and inspiration (no code copied):
 
-- Market Lab (https://github.com/heysanjeevv/market-lab), MIT License,
-  Copyright (c) 2026 Market Lab contributors — the original free NSE
-  dashboard idea (Smart Money, Sector Map, swing backtests).
 - DayTrader skill (https://github.com/JakesChincariol/day-trader-skill),
   MIT License, Copyright (c) 2026 Jake Schincariol — the 11-skill pipeline,
   ORB close-confirmation, four-limit sizing, Monte Carlo time machine and

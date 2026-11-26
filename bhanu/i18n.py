@@ -41,6 +41,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "ORB Scanner",
         "hi": "ORB Scanner",
     },
+    "levels": {
+        "en": "Levels",
+        "hi": "Levels",
+    },
+    "skills": {
+        "en": "Skills",
+        "hi": "Skills",
+    },
     "entry": {
         "en": "Entry",
         "hi": "Entry",

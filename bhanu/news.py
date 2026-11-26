@@ -286,6 +286,11 @@ def check_symbol(symbol: str) -> dict[str, Any]:
         "change_pct": change_pct,
         "tags": tags,
         "items": new_items,
+        # "latest" is the most recent fetched items (announcements first),
+        # regardless of the 30-day dedupe — for dashboard display, so the
+        # latest headlines stay visible even after they were first seen.
+        # "items" above is the new/unseen set only (alerts, not a feed).
+        "latest": (nse_items + yahoo_items)[:5],
         "sources": {
             "nse_announcements": nse_note or f"{len(nse_items)} item(s)",
             "bse_announcements": bse_note,
