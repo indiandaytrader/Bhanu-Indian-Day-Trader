@@ -39,6 +39,11 @@ CACHE_DIR = REPO_ROOT / "data" / "cache"
 # Polite-access settings.
 REQUEST_PAUSE_S = 0.3
 RETRY_AFTER_S = 5.0
+#: Per-request timeout (seconds). A slow Yahoo must never block a
+#: page for ~90s: 10s x 2 attempts x 2 hosts is the worst case, and
+#: the dashboard loads its charts lazily, so a slow fetch only delays
+#: one chart card, never the page.
+FETCH_TIMEOUT_S = 10.0
 USER_AGENT = "Mozilla/5.0 (bhanu-indian-day-trader; paper-trading research)"
 
 # Cache lifetimes.
@@ -115,18 +120,43 @@ def _cache_path(key: str) -> Path:
     return CACHE_DIR / f"{safe}.json"
 
 
-def _read_cache(key: str, ttl: timedelta) -> dict[str, Any] | None:
+def _read_cache_payload(key: str) -> dict[str, Any] | None:
     path = _cache_path(key)
     if not path.exists():
         return None
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            payload = json.load(fh)
+            return json.load(fh)
+    except (ValueError, OSError, json.JSONDecodeError):
+        return None
+
+
+def _read_cache(key: str, ttl: timedelta) -> dict[str, Any] | None:
+    payload = _read_cache_payload(key)
+    if payload is None:
+        return None
+    try:
         saved_at = datetime.fromisoformat(payload["saved_at"])
         if datetime.now() - saved_at > ttl:
             return None
         return payload["data"]
-    except (KeyError, ValueError, OSError, json.JSONDecodeError):
+    except (KeyError, ValueError):
+        return None
+
+
+def _read_stale_payload(key: str) -> tuple[dict[str, Any], str] | None:
+    """A cached payload ignoring its TTL — ``(data, saved_at)`` or None.
+
+    Used as a fallback when the live fetch fails, so a chart can still
+    show real (slightly old) bars instead of nothing. The data is real
+    market data from an earlier successful fetch, never fabricated.
+    """
+    payload = _read_cache_payload(key)
+    if payload is None:
+        return None
+    try:
+        return payload["data"], payload["saved_at"]
+    except KeyError:
         return None
 
 
@@ -151,7 +181,7 @@ def _get_json(url: str) -> dict[str, Any]:
                 req = urllib.request.Request(
                     host_url, headers={"User-Agent": USER_AGENT}
                 )
-                with urllib.request.urlopen(req, timeout=20) as resp:
+                with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT_S) as resp:
                     return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 last_error = exc
@@ -219,7 +249,15 @@ def fetch_daily_bars(symbol: str, days: int = 30) -> pd.DataFrame:
         f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
         f"?range={days}d&interval=1d"
     )
-    payload = _get_json(url)
+    try:
+        payload = _get_json(url)
+    except DataError:
+        # Live fetch failed — serve the last cached bars (real data,
+        # just older) instead of nothing.
+        stale = _read_stale_payload(cache_key)
+        if stale is not None:
+            return _chart_to_frame(stale[0], symbol)
+        raise
     _write_cache(cache_key, payload)
     return _chart_to_frame(payload, symbol)
 
@@ -238,25 +276,47 @@ def fetch_daily_bars_safe(symbol: str, days: int = 30) -> tuple[pd.DataFrame, st
         ), str(exc)
 
 
+def fetch_intraday_bars_meta(symbol: str, interval: str = "5m",
+                             days: int = 1) -> tuple[pd.DataFrame, bool, str]:
+    """Like :func:`fetch_intraday_bars` but also reports staleness:
+    ``(frame, stale, as_of)`` — ``stale`` is True when the bars came
+    from an expired disk cache because the live fetch failed, and
+    ``as_of`` is that cache's save time ('' when the bars are fresh).
+    The stale bars are real market data from an earlier successful
+    fetch, never fabricated.
+    """
+    cache_key = f"intraday_{symbol}_{interval}_{days}d"
+    cached = _read_cache(cache_key, INTRADAY_CACHE_TTL)
+    if cached is not None:
+        return _chart_to_frame(cached, symbol), False, ""
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        f"?range={days}d&interval={interval}"
+    )
+    try:
+        payload = _get_json(url)
+    except DataError:
+        stale = _read_stale_payload(cache_key)
+        if stale is not None:
+            data, saved_at = stale
+            return _chart_to_frame(data, symbol), True, saved_at
+        raise
+    _write_cache(cache_key, payload)
+    return _chart_to_frame(payload, symbol), False, ""
+
+
 def fetch_intraday_bars(symbol: str, interval: str = "5m", days: int = 1) -> pd.DataFrame:
     """Intraday OHLCV bars for ``symbol`` at ``interval`` (default 5m).
 
     ``days`` sets how many sessions of bars to fetch (default 1 = today
     only; 5 = the last 5 sessions, used for swing levels). Returns a
     DataFrame with the same shape as :func:`fetch_daily_bars`, indexed
-    by IST datetime. Raises :class:`DataError` on failure.
+    by IST datetime. Raises :class:`DataError` on failure — unless a
+    stale disk cache exists, in which case those (real, older) bars
+    are returned instead of raising.
     """
-    cache_key = f"intraday_{symbol}_{interval}_{days}d"
-    cached = _read_cache(cache_key, INTRADAY_CACHE_TTL)
-    if cached is not None:
-        return _chart_to_frame(cached, symbol)
-    url = (
-        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        f"?range={days}d&interval={interval}"
-    )
-    payload = _get_json(url)
-    _write_cache(cache_key, payload)
-    return _chart_to_frame(payload, symbol)
+    frame, _stale, _as_of = fetch_intraday_bars_meta(symbol, interval, days)
+    return frame
 
 
 def fetch_quote(symbol: str) -> dict[str, Any]:

@@ -34,7 +34,12 @@ MIN_RISK_PCT = 0.0005  # 0.05% of entry price — tighter than this is spread no
 
 @dataclass
 class ExitPlan:
-    """Stop + target for one planned trade."""
+    """Stop + target for one planned trade.
+
+    Targets come in three steps, like a Telegram tip: TP1 = 1R,
+    TP2 = 2R, TP3 = 3R (R = risk per unit). ``target`` is kept as an
+    alias of TP2 so existing callers are unaffected.
+    """
 
     entry: float
     stop: float
@@ -45,6 +50,9 @@ class ExitPlan:
     rr: float
     flat_by: str = "15:15"
     direction: str = "long"
+    tp1: float = 0.0  # 1R target
+    tp2: float = 0.0  # 2R target (= target)
+    tp3: float = 0.0  # 3R target
 
 
 def _round_away_from_entry(value: float, entry: float) -> float:
@@ -187,6 +195,12 @@ def compute_exit(
     if direction == "short" and target >= entry:
         raise ValueError(f"target {target:.2f} is not below entry {entry:.2f}")
 
+    # Three targets: TP1 = 1R, TP2 = 2R (= target, backward compatible),
+    # TP3 = 3R. All rounded half-up to paise, like the target.
+    tp1 = _round_half_up(entry + sign * risk_per_unit * 1.0)
+    tp2 = target
+    tp3 = _round_half_up(entry + sign * risk_per_unit * 3.0)
+
     return ExitPlan(
         entry=entry,
         stop=stop,
@@ -197,6 +211,9 @@ def compute_exit(
         rr=reward_per_unit / risk_per_unit if risk_per_unit else 0.0,
         flat_by=flat_by,
         direction=direction,
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
     )
 
 

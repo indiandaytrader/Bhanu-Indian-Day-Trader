@@ -23,11 +23,13 @@ from bhanu import news as news_mod
 from bhanu import paper as paper_mod
 from bhanu import risk as risk_mod
 from bhanu import scanner as scanner_mod
+from bhanu import signal as signal_mod
 from bhanu import sizing as sizing_mod
 from bhanu import skills as skills_mod
 from bhanu import structure as structure_mod
 from bhanu import timecheck as timecheck_mod
 from bhanu import timemachine as tm_mod
+from bhanu import volume as volume_mod
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -534,22 +536,26 @@ class TestDashboardNews(unittest.TestCase):
         from web import app as app_mod
         app_mod._cache.clear()
         with patch.object(news_mod, "check_symbol", return_value=self._mock_news()):
-            html = app_mod.home("hi")
+            # Headlines arrive via /api/news after the page loads; the
+            # home page itself carries the news-feed slot.
+            out = app_mod._api_news({}, "hi")
+            page = app_mod.home("hi")
+        self.assertIn("news-feed", page)
         # Headlines are visible without the user doing anything.
-        self.assertIn("Nifty rallies on FII buying", html)
-        self.assertIn("RBI keeps repo rate unchanged", html)
+        self.assertIn("Nifty rallies on FII buying", out["html"])
+        self.assertIn("RBI keeps repo rate unchanged", out["html"])
         # Bot language, and the blocked NSE source is stated honestly.
-        self.assertIn("Bot ne abhi check kiya", html)
-        self.assertIn("NSE announcements unavailable", html)
+        self.assertIn("Bot ne abhi check kiya", out["html"])
+        self.assertIn("NSE announcements unavailable", out["html"])
 
     def test_home_news_failure_is_honest(self):
         from unittest.mock import patch
         from web import app as app_mod
         app_mod._cache.clear()
         with patch.object(news_mod, "check_symbol", side_effect=RuntimeError("network down")):
-            html = app_mod.home("hi")
-        self.assertIn("News unavailable", html)
-        self.assertNotIn("Nifty rallies", html)
+            out = app_mod._api_news({}, "hi")
+        self.assertIn("News unavailable", out["html"])
+        self.assertNotIn("Nifty rallies", out["html"])
 
 
 def _structure_bars():
@@ -712,16 +718,18 @@ class TestCharts(unittest.TestCase):
 
     def test_intraday_series_offline(self):
         from unittest.mock import patch
-        with patch.object(charts_mod, "fetch_intraday_bars", return_value=_bars_5m()):
+        with patch.object(charts_mod, "fetch_intraday_bars_meta",
+                          return_value=(_bars_5m(), False, "")):
             payload = charts_mod.intraday_series("^NSEI")
         self.assertEqual(len(payload["candles"]), 6)
         self.assertEqual(len(payload["line"]), 6)
         self.assertIsNone(payload["error"])
+        self.assertFalse(payload["stale"])
 
     def test_intraday_series_error_is_honest(self):
         from unittest.mock import patch
         with patch.object(
-            charts_mod, "fetch_intraday_bars",
+            charts_mod, "fetch_intraday_bars_meta",
             side_effect=data_mod.DataError("Yahoo HTTP 403"),
         ):
             payload = charts_mod.intraday_series("^NSEI")
@@ -855,11 +863,13 @@ class TestChartPages(unittest.TestCase):
              patch.object(data_mod, "fetch_quote", return_value={"price": 25900.0, "prev_close": 25819.25, "change_pct": 0.31}), \
              patch.object(scanner_mod, "scan_orb", return_value=self._mock_scan()):
             html = app_mod.home("hi")
+            news = app_mod._api_news({}, "hi")
         for needle in ("chart-nifty", "chart-bank", "chart-sensex",
                        "Smart Money Flow", "flow-chart", "Sector Map", "sector-map",
-                       "News Feed", "Nifty rallies on FII buying",
-                       "ORB Hits", "lightweight-charts"):
+                       "News Feed", "ORB Hits", "lightweight-charts"):
             self.assertIn(needle, html)
+        # The headline itself arrives via /api/news after the page loads.
+        self.assertIn("Nifty rallies on FII buying", news["html"])
 
     def test_orb_page_has_candle_chart(self):
         from unittest.mock import patch
@@ -920,7 +930,12 @@ class TestChartPages(unittest.TestCase):
             "backtest": {"available": False, "reason": "no data"},
         }
         with patch.object(timecheck_mod, "collect_timemachine", return_value=data):
-            html = app_mod.timemachine_page("en")
+            # The body arrives via /api/timemachine; the page itself
+            # carries the lazy slot.
+            out = app_mod._api_timemachine()
+            page = app_mod.timemachine_page("en")
+        html = out["html"]
+        self.assertIn("timemachine-body", page)
         self.assertIn("Monte Carlo distribution", html)
         self.assertIn("Stop (-1R)", html)
         self.assertIn("Target (+2R)", html)
@@ -933,6 +948,663 @@ class TestChartPages(unittest.TestCase):
         self.assertIn("Stop (-1R)", svg)
         self.assertIn("Target (+2R)", svg)
         self.assertIn("+0.33R", svg)
+
+
+class TestExitTargets(unittest.TestCase):
+    """TP1 / TP2 / TP3 (1R / 2R / 3R) on the exit plan."""
+
+    def test_long_tp1_tp2_tp3(self):
+        plan = exit_mod.compute_exit(
+            entry=25730.0, range_high=25718.0, range_low=25687.0)
+        # risk per unit = 27.50 (entry 25730 - stop 25702.50)
+        self.assertAlmostEqual(plan.risk_per_unit, 27.50)
+        self.assertAlmostEqual(plan.tp1, 25757.50)  # entry + 1R
+        self.assertAlmostEqual(plan.tp2, 25785.00)  # entry + 2R
+        self.assertAlmostEqual(plan.tp3, 25812.50)  # entry + 3R
+        self.assertAlmostEqual(plan.target, plan.tp2)  # target == TP2
+
+    def test_short_tp1_tp2_tp3(self):
+        plan = exit_mod.compute_exit(
+            entry=25680.0, range_high=25718.0, range_low=25687.0)
+        self.assertEqual(plan.direction, "short")
+        self.assertAlmostEqual(plan.risk_per_unit, 22.50)
+        self.assertAlmostEqual(plan.tp1, 25657.50)  # entry - 1R
+        self.assertAlmostEqual(plan.tp2, 25635.00)  # entry - 2R
+        self.assertAlmostEqual(plan.target, plan.tp2)
+        self.assertAlmostEqual(plan.tp3, 25612.50)  # entry - 3R
+
+    def test_orb_plan_carries_tp1_tp2_tp3(self):
+        plan = entry_mod.plan_orb_entry(_bars_5m(), direction="long",
+                                        symbol="NIFTY")
+        self.assertIsNotNone(plan)
+        self.assertAlmostEqual(plan.tp1, plan.entry + abs(plan.entry - plan.stop))
+        self.assertAlmostEqual(plan.tp2, plan.target)
+        self.assertAlmostEqual(plan.tp3, plan.entry + 3 * abs(plan.entry - plan.stop))
+
+
+def _volume_bars(trigger_volume: float, base_volume: float = 1000.0,
+                 n: int = 26) -> pd.DataFrame:
+    """Synthetic 5m bars: steady volume, then one trigger bar."""
+    base = datetime(2026, 11, 26, 9, 15, tzinfo=IST)
+    idx = pd.DatetimeIndex(
+        [base + pd.Timedelta(minutes=5 * i) for i in range(n)], tz=IST)
+    volumes = [base_volume] * (n - 1) + [trigger_volume]
+    closes = [100.0 + i * 0.1 for i in range(n)]
+    return pd.DataFrame(
+        {"open": closes, "high": [c + 0.2 for c in closes],
+         "low": [c - 0.2 for c in closes], "close": closes,
+         "volume": volumes},
+        index=idx,
+    )
+
+
+class TestVolume(unittest.TestCase):
+    def test_high_relative_volume_is_strong(self):
+        out = volume_mod.relative_volume(_volume_bars(2500.0))
+        self.assertTrue(out["available"])
+        self.assertAlmostEqual(out["rel_vol"], 2.5)
+        self.assertEqual(out["verdict"], "STRONG")
+
+    def test_low_relative_volume_is_weak(self):
+        out = volume_mod.relative_volume(_volume_bars(500.0))
+        self.assertAlmostEqual(out["rel_vol"], 0.5)
+        self.assertEqual(out["verdict"], "WEAK")
+
+    def test_average_volume_is_normal(self):
+        out = volume_mod.relative_volume(_volume_bars(1100.0))
+        self.assertAlmostEqual(out["rel_vol"], 1.1)
+        self.assertEqual(out["verdict"], "normal")
+
+    def test_trigger_bar_by_time(self):
+        bars = _volume_bars(2500.0)
+        # The 10:00 bar (index 9) has base volume 1000 -> 1.0x normal.
+        out = volume_mod.relative_volume(bars, trigger_time="10:00")
+        self.assertAlmostEqual(out["rel_vol"], 1.0)
+        self.assertEqual(out["verdict"], "normal")
+
+    def test_volume_trend_rising_and_falling(self):
+        base = datetime(2026, 11, 26, 9, 15, tzinfo=IST)
+        idx = pd.DatetimeIndex(
+            [base + pd.Timedelta(minutes=5 * i) for i in range(10)], tz=IST)
+        rising = pd.DataFrame(
+            {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0,
+             "volume": [100.0] * 5 + [300.0] * 5}, index=idx)
+        self.assertEqual(volume_mod.volume_trend(rising)["trend"], "rising")
+        falling = pd.DataFrame(
+            {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0,
+             "volume": [300.0] * 5 + [100.0] * 5}, index=idx)
+        self.assertEqual(volume_mod.volume_trend(falling)["trend"], "falling")
+
+    def test_analyse_volume_uses_own_bars(self):
+        out = volume_mod.analyse_volume("RELIANCE", bars=_volume_bars(2200.0))
+        self.assertEqual(out["verdict"], "STRONG")
+        self.assertAlmostEqual(out["rel_vol"], 2.2)
+
+    def test_analyse_volume_never_blocks_when_nothing_fetches(self):
+        from unittest.mock import patch
+        with patch.object(volume_mod, "_fetch_proxy_bars",
+                          return_value=pd.DataFrame()):
+            out = volume_mod.analyse_volume("NIFTY", bars=pd.DataFrame())
+        # A verdict is always returned, neutral, and the wording never
+        # says the data is missing.
+        self.assertEqual(out["verdict"], "normal")
+        self.assertIsNone(out["rel_vol"])
+        self.assertNotIn("unavailable", out["reason"].lower())
+        self.assertNotIn("proxy", out["reason"].lower())
+
+
+def _news_result(*titles: str) -> dict:
+    return {"latest": [
+        {"source": "Yahoo headline", "title": t, "link": "",
+         "published": "", "tags": []} for t in titles]}
+
+
+_MC_GOOD = {"available": True, "target_first_pct": 40.0,
+            "stop_first_pct": 50.0, "neither_pct": 10.0, "avg_r": 0.2,
+            "n": 10000, "break_even_pct": 33.3}
+_MC_HALF = {"available": True, "target_first_pct": 30.0,
+            "stop_first_pct": 58.0, "neither_pct": 12.0, "avg_r": -0.1,
+            "n": 10000, "break_even_pct": 33.3}
+_MC_BAD = {"available": True, "target_first_pct": 18.0,
+           "stop_first_pct": 70.0, "neither_pct": 12.0, "avg_r": -0.4,
+           "n": 10000, "break_even_pct": 33.3}
+_VOL_STRONG = {"symbol": "NIFTY", "rel_vol": 2.1, "verdict": "STRONG",
+               "trend": "rising", "reason": "Trigger bar volume 2.1x."}
+_VOL_WEAK = {"symbol": "NIFTY", "rel_vol": 0.5, "verdict": "WEAK",
+             "trend": "falling", "reason": "Trigger bar volume 0.5x."}
+_VOL_NORMAL = {"symbol": "NIFTY", "rel_vol": 1.1, "verdict": "normal",
+               "trend": "flat", "reason": "Trigger bar volume 1.1x."}
+
+
+class TestSignal(unittest.TestCase):
+    def _signal(self, **kwargs):
+        base = dict(symbol="NIFTY", direction="long", entry=25730.0,
+                    stop=25702.5, target=25785.0, support=25687.0,
+                    resistance=25800.0, news_result=_news_result(
+                        "Reliance Q2 profit rises 12% to a record"),
+                    mc_result=_MC_GOOD, volume_result=_VOL_STRONG)
+        base.update(kwargs)
+        return signal_mod.entry_signal(**base)
+
+    def test_clean_setup_enters(self):
+        sig = self._signal()
+        self.assertEqual(sig["decision"], "ENTER")
+        self.assertEqual(sig["size_factor"], 1.0)
+        self.assertAlmostEqual(sig["tp1"], 25757.50)
+        self.assertAlmostEqual(sig["tp2"], 25785.00)
+        self.assertAlmostEqual(sig["tp3"], 25812.50)
+
+    def test_negative_news_blocks_entry(self):
+        sig = self._signal(news_result=_news_result(
+            "SEBI probe: company faces fraud penalty, shares fall"))
+        self.assertEqual(sig["decision"], "BLOCKED")
+        self.assertEqual(sig["size_factor"], 0.0)
+        self.assertEqual(sig["factors"]["news"]["verdict"], "block")
+        self.assertIn("fraud", sig["factors"]["news"]["reason"])
+
+    def test_positive_news_supports_entry(self):
+        sig = self._signal()
+        self.assertEqual(sig["factors"]["news"]["verdict"], "support")
+        self.assertEqual(sig["decision"], "ENTER")
+
+    def test_positive_news_blocks_a_short(self):
+        sig = self._signal(direction="short", entry=25680.0, stop=25702.5,
+                           target=25635.0, support=25650.0,
+                           resistance=25718.0)
+        self.assertEqual(sig["factors"]["news"]["verdict"], "block")
+        self.assertEqual(sig["decision"], "BLOCKED")
+
+    def test_negative_news_supports_a_short(self):
+        sig = self._signal(direction="short", entry=25680.0, stop=25702.5,
+                           target=25635.0, support=25650.0,
+                           resistance=25718.0,
+                           news_result=_news_result(
+                               "Company reports loss, shares crash"))
+        self.assertEqual(sig["factors"]["news"]["verdict"], "support")
+        self.assertEqual(sig["decision"], "ENTER")
+
+    def test_bad_monte_carlo_blocks_entry(self):
+        sig = self._signal(mc_result=_MC_BAD)
+        self.assertEqual(sig["decision"], "BLOCKED")
+        self.assertEqual(sig["factors"]["mc"]["verdict"], "block")
+        self.assertAlmostEqual(
+            sig["factors"]["mc"]["target_first_pct"], 18.0)
+
+    def test_mediocre_monte_carlo_halves_size(self):
+        sig = self._signal(mc_result=_MC_HALF)
+        self.assertEqual(sig["decision"], "HALF SIZE")
+        self.assertEqual(sig["size_factor"], 0.5)
+        self.assertEqual(sig["factors"]["mc"]["verdict"], "half")
+
+    def test_weak_volume_halves_size(self):
+        sig = self._signal(volume_result=_VOL_WEAK)
+        self.assertEqual(sig["decision"], "HALF SIZE")
+        self.assertEqual(sig["size_factor"], 0.5)
+        self.assertEqual(sig["factors"]["volume"]["verdict"], "half")
+        self.assertEqual(sig["factors"]["volume"]["volume_verdict"], "WEAK")
+
+    def test_resistance_before_tp1_halves_size(self):
+        sig = self._signal(resistance=25740.0)
+        self.assertEqual(sig["decision"], "HALF SIZE")
+        self.assertEqual(sig["factors"]["levels"]["verdict"], "half")
+
+    def test_no_setup_is_no_signal(self):
+        sig = signal_mod.entry_signal("NIFTY", "long", None, None, None)
+        self.assertEqual(sig["decision"], "NO SIGNAL")
+
+    def test_news_unavailable_is_price_only_not_a_block(self):
+        from unittest.mock import patch
+        with patch.object(news_mod, "check_symbol",
+                          side_effect=RuntimeError("network down")):
+            factor = signal_mod.news_factor("NIFTY", "long")
+        self.assertFalse(factor["available"])
+        self.assertEqual(factor["verdict"], "neutral")
+        self.assertIn("price-only", factor["reason"])
+        with patch.object(news_mod, "check_symbol",
+                          side_effect=RuntimeError("network down")):
+            sig = signal_mod.entry_signal(
+                "NIFTY", "long", 25730.0, 25702.5, 25785.0,
+                support=25687.0, resistance=25800.0,
+                mc_result=_MC_GOOD, volume_result=_VOL_STRONG)
+        self.assertEqual(sig["decision"], "ENTER")
+        self.assertIn("price-only", sig["factors"]["news"]["reason"])
+
+    def test_fresh_negative_news_on_open_long_exits_now(self):
+        out = signal_mod.exit_signal(
+            "NIFTY", "long", 25730.0,
+            news_result=_news_result(
+                "SEBI probe: company faces fraud penalty, shares fall"))
+        self.assertEqual(out["action"], "EXIT NOW")
+        self.assertIn("fraud", out["reason"])
+
+    def test_mild_negative_news_on_open_long_exits_early(self):
+        out = signal_mod.exit_signal(
+            "NIFTY", "long", 25730.0,
+            news_result=_news_result("Company shares fall after a soft quarter"))
+        self.assertEqual(out["action"], "EXIT EARLY")
+
+    def test_no_news_against_open_position_holds(self):
+        out = signal_mod.exit_signal(
+            "NIFTY", "long", 25730.0,
+            news_result=_news_result("Reliance Q2 profit rises 12%"))
+        self.assertEqual(out["action"], "HOLD")
+
+    def test_positive_news_on_open_short_exits(self):
+        out = signal_mod.exit_signal(
+            "NIFTY", "short", 25680.0,
+            news_result=_news_result(
+                "Company profit surges to a record high"))
+        self.assertIn(out["action"], ("EXIT NOW", "EXIT EARLY"))
+
+
+class TestSignalDashboard(unittest.TestCase):
+    def setUp(self):
+        import os, time
+        from web import app as app_mod
+        app_mod._cache.clear()
+        wl = Path(__file__).resolve().parent.parent / "data" / "watchlist.json"
+        if wl.exists():
+            old = time.time() - 3600
+            os.utime(wl, (old, old))
+
+    def _mock_scan(self):
+        return {
+            "scan": "orb", "run_at_ist": "2026-11-26 12:00:00 IST",
+            "fetched": 39, "usable": 38,
+            "hits": [{"symbol": "NIFTY", "yahoo_symbol": "^NSEI",
+                      "direction": "long", "close": 25730.0,
+                      "bar_time": "09:35", "range_high": 25718.0,
+                      "range_low": 25687.0, "volume": 1500.0,
+                      "price_x_volume": 38595000.0, "date": "2026-11-26"}],
+            "failed": [], "hit_count": 1, "as_of": "2026-11-26 12:00:00 IST",
+        }
+
+    def _mock_news(self):
+        return {
+            "symbol": "NIFTY", "moving": False, "change_pct": 0.39,
+            "tags": [], "items": [], "latest": [
+                {"source": "Yahoo headline",
+                 "title": "Reliance Q2 profit rises 12% to a record",
+                 "link": "", "published": "", "tags": ["earnings"]}],
+            "sources": {"nse_announcements": "ok",
+                        "yahoo_headlines": "1 item(s)"},
+            "quote_error": "",
+        }
+
+    def _mock_mc(self):
+        return {
+            "setup": {"symbol": "NIFTY", "signal": "long",
+                      "entry": 25730.0, "stop": 25702.5, "target": 25785.0},
+            "setup_error": None,
+            "monte_carlo": dict(_MC_GOOD, symbol="NIFTY",
+                                direction="long", entry=25730.0,
+                                stop=25702.5, target=25785.0),
+            "trade_check": {"available": False, "reason": "no setup"},
+            "backtest": {"available": False, "reason": "no data"},
+        }
+
+    def test_orb_breakdown_api_shows_signal(self):
+        # /orb itself renders instantly (lazy placeholders); the
+        # breakdown arrives via /api/orbbreakdown and the table via
+        # /api/orb — test those fragments directly.
+        from unittest.mock import patch
+        from web import app as app_mod
+        with patch.object(scanner_mod, "scan_orb",
+                          return_value=self._mock_scan()), \
+             patch.object(news_mod, "check_symbol",
+                          return_value=self._mock_news()), \
+             patch.object(timecheck_mod, "collect_timemachine",
+                          return_value=self._mock_mc()), \
+             patch.object(volume_mod, "analyse_volume",
+                          return_value=dict(_VOL_STRONG)), \
+             patch.object(data_mod, "fetch_intraday_bars",
+                          return_value=_volume_bars(2500.0)):
+            out = app_mod._api_orbbreakdown({"symbol": ["NIFTY"]}, "en")
+            table = app_mod._api_orb({}, "en")
+        html = out["html"]
+        for needle in ("Signal breakdown", "TP1", "TP2", "TP3",
+                       "25,757.50", "25,785.00", "25,812.50",
+                       "Volume:", "STRONG", "News:", "Time Machine:"):
+            self.assertIn(needle, html)
+        for needle in ("TP1 / TP2 / TP3", "25,757.50", "25,785.00",
+                       "25,812.50"):
+            self.assertIn(needle, table["html"])
+        # The page itself carries the lazy placeholder + loader.
+        page = app_mod.orb_page("en", {"symbol": ["NIFTY"]})
+        self.assertIn("orb-breakdown", page)
+        self.assertIn("Signal breakdown load ho raha hai", page)
+
+    def test_levels_breakdown_api_shows_signal(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        row = {"symbol": "NIFTY", "price": 25748.0,
+               "nearest_support": 25650.0, "nearest_resistance": 25800.0,
+               "pdh": 25800.0, "pdl": 25550.0, "entry": 25730.0,
+               "stop": 25702.5, "atr_stop": 25690.0, "target": 25785.0,
+               "tp1": 25757.5, "tp2": 25785.0, "tp3": 25812.5,
+               "signal": "long"}
+        with patch.object(levels_mod, "scan_levels",
+                          return_value={"run_at_ist": "2026-11-26 12:00:00 IST",
+                                        "levels": [row], "failed": []}), \
+             patch.object(news_mod, "check_symbol",
+                          return_value=self._mock_news()), \
+             patch.object(timecheck_mod, "collect_timemachine",
+                          return_value=self._mock_mc()), \
+             patch.object(volume_mod, "analyse_volume",
+                          return_value=dict(_VOL_STRONG)), \
+             patch.object(data_mod, "fetch_intraday_bars",
+                          return_value=_volume_bars(2500.0)):
+            out = app_mod._api_levelsbreakdown({"symbol": ["NIFTY"]}, "en")
+            table = app_mod._api_levels({}, "en")
+        html = out["html"]
+        for needle in ("Signal breakdown", "TP1", "TP2", "TP3",
+                       "25,757.50", "25,785.00", "25,812.50",
+                       "Volume:", "STRONG", "News:", "Time Machine:"):
+            self.assertIn(needle, html)
+        for needle in ("TP1", "TP2", "TP3",
+                       "25,757.50", "25,785.00", "25,812.50"):
+            self.assertIn(needle, table["html"])
+        page = app_mod.levels_page("en", {"symbol": ["NIFTY"]})
+        self.assertIn("levels-breakdown", page)
+        self.assertIn("Signal breakdown load ho raha hai", page)
+
+    def test_paper_page_shows_exit_check_on_bad_news(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        from datetime import date
+        positions = [{"id": "P-0001", "symbol": "NIFTY",
+                      "direction": "long", "qty": 1, "entry": 25730.0,
+                      "stop": 25702.5, "target": 25785.0}]
+        bad_news = _news_result(
+            "SEBI probe: company faces fraud penalty, shares fall")
+        with patch.object(paper_mod, "list_positions",
+                          return_value=positions), \
+             patch.object(paper_mod, "list_trades", return_value=[]), \
+             patch.object(paper_mod, "day_summary",
+                          return_value={"trades": 0, "realised_pnl": 0.0,
+                                        "risk_taken": 0.0, "flat": True}), \
+             patch.object(news_mod, "check_symbol", return_value=bad_news):
+            html = app_mod.paper_page("en")
+        self.assertIn("EXIT NOW", html)
+        self.assertIn("P-0001", html)
+
+
+class TestLiveRefresh(unittest.TestCase):
+    """60-second auto-refresh: timer, LIVE indicator, failure honesty."""
+
+    def test_refresh_interval_is_60s(self):
+        from web import app as app_mod
+        self.assertEqual(app_mod.LIVE_REFRESH_MS, 60_000)
+        js = app_mod._live_js()
+        self.assertIn("60000", js)
+        self.assertIn("BHANU_REFRESH_MS", js)
+
+    def test_live_indicator_on_chart_pages_only(self):
+        from web import app as app_mod
+        for html in (app_mod.home("en"), app_mod.orb_page("en", {"symbol": ["NIFTY"]}),
+                     app_mod.levels_page("en", {"symbol": ["NIFTY"]}),
+                     app_mod.sectors_page("en"), app_mod.timemachine_page("en")):
+            self.assertIn("bhanu-live-indicator", html)
+            self.assertIn("LIVE", html)
+        for html in (app_mod.chain_page("en", {"symbol": ["NIFTY"]}),
+                     app_mod.sizing_page("en", {}), app_mod.paper_page("en"),
+                     app_mod.skills_page("en")):
+            self.assertNotIn("bhanu-live-indicator", html)
+
+    def test_live_js_handles_hidden_tab_failure_and_retry(self):
+        from web import app as app_mod
+        js = app_mod._live_js()
+        for needle in ("document.hidden", "allSettled", "update failed, retrying",
+                       "last good", "visibilitychange", "bhanuMarkLive"):
+            self.assertIn(needle, js)
+
+    def test_chart_pages_register_refreshers_and_mark_live(self):
+        from web import app as app_mod
+        home = app_mod.home("en")
+        for needle in ("/api/intraday", "/api/quotes", "/api/news",
+                       "bhanuQuoteRefresh", "bhanuNewsRefresh",
+                       "bhanuLazyLine", "bhanuFlowChart", "bhanuSectorMap",
+                       "bhanuOrbHitsFetch"):
+            self.assertIn(needle, home)
+        orb = app_mod.orb_page("en", {"symbol": ["NIFTY"]})
+        self.assertIn("/api/orbchart", orb)
+        self.assertIn("bhanuOrbLoad", orb)
+        levels = app_mod.levels_page("en", {"symbol": ["NIFTY"]})
+        self.assertIn("/api/levelschart", levels)
+        self.assertIn("bhanuLevelsLoad", levels)
+        tm = app_mod.timemachine_page("en")
+        self.assertIn("/api/timemachine", tm)
+        self.assertIn("bhanuTimemachineLoad", tm)
+
+    def test_no_market_lab_name_in_live_or_chart_js(self):
+        from web import app as app_mod
+        self.assertNotIn("Market Lab", app_mod._live_js())
+        self.assertNotIn("Market Lab", app_mod._chart_js())
+
+    def test_api_intraday_failure_is_honest(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        app_mod._cache.clear()
+        with patch.object(charts_mod, "intraday_series",
+                          return_value={"symbol": "^NSEI", "line": [], "candles": [],
+                                        "error": "Yahoo HTTP 403"}):
+            out = app_mod._api_intraday({"symbol": ["^NSEI"]})
+        self.assertEqual(out["line"], [])
+        self.assertIn("403", out["error"])
+
+
+class TestPerformance(unittest.TestCase):
+    """Pages render instantly: no server fetch blocks a page load."""
+
+    def setUp(self):
+        from web import app as app_mod
+        app_mod._cache.clear()
+
+    def test_home_renders_under_2s_with_warm_cache(self):
+        import time
+        from unittest.mock import patch
+        from web import app as app_mod
+        with patch.object(paper_mod, "day_summary",
+                          return_value={"trades": 0, "realised_pnl": 0.0,
+                                        "risk_taken": 0.0, "flat": True}):
+            t0 = time.time()
+            html = app_mod.home("hi")
+            secs = time.time() - t0
+        self.assertLess(secs, 2.0)
+        self.assertIn("Bhanu Indian Day Trader", html)
+
+    def test_charts_load_async_no_embedded_json(self):
+        from web import app as app_mod
+        html = app_mod.home("en")
+        self.assertIn("bhanuLazyLine", html)
+        self.assertIn("/api/intraday?symbol=", html)
+        self.assertNotIn("chart-nifty-data", html)
+        self.assertNotIn("chart-bank-data", html)
+        self.assertNotIn("chart-sensex-data", html)
+        orb = app_mod.orb_page("en", {"symbol": ["NIFTY"]})
+        self.assertIn("bhanuOrbLoad", orb)
+        self.assertNotIn("orb-chart-data", orb)
+        levels = app_mod.levels_page("en", {"symbol": ["NIFTY"]})
+        self.assertIn("bhanuLevelsLoad", levels)
+        self.assertNotIn("levels-chart-data", levels)
+
+    def test_loading_states_on_every_lazy_section(self):
+        from web import app as app_mod
+        for html in (app_mod.home("en"), app_mod.orb_page("en", {"symbol": ["NIFTY"]}),
+                     app_mod.levels_page("en", {"symbol": ["NIFTY"]}),
+                     app_mod.timemachine_page("en")):
+            self.assertIn("load ho raha hai", html)
+
+    def test_cache_hit_avoids_second_fetch(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        small = {"symbol": "^NSEI", "line": [{"time": 1, "value": 1.0}],
+                 "candles": [], "error": None}
+        with patch.object(charts_mod, "intraday_series",
+                          return_value=small) as mocked:
+            app_mod._api_intraday({"symbol": ["^NSEI"]})
+            app_mod._api_intraday({"symbol": ["^NSEI"]})
+        self.assertEqual(mocked.call_count, 1)
+        with patch.object(data_mod, "fetch_quote",
+                          return_value={"price": 1.0, "prev_close": 1.0,
+                                        "change_pct": 0.0}) as mocked_q:
+            app_mod._api_quotes()
+            app_mod._api_quotes()
+        self.assertEqual(mocked_q.call_count, 3)  # once per index, then cached
+
+    def test_api_orb_and_levels_return_html_fragments(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        scan = {
+            "scan": "orb", "run_at_ist": "2026-11-26 12:00:00 IST",
+            "fetched": 39, "usable": 38,
+            "hits": [{"symbol": "NIFTY", "yahoo_symbol": "^NSEI", "direction": "long",
+                      "close": 25730.0, "bar_time": "09:35",
+                      "range_high": 25718.0, "range_low": 25687.0}],
+            "failed": [], "hit_count": 1, "as_of": "2026-11-26 12:00:00 IST",
+        }
+        with patch.object(app_mod, "_orb_scan", return_value=scan):
+            out = app_mod._api_orb({}, "en")
+        self.assertIn("NIFTY", out["html"])
+        self.assertEqual(out["top_symbol"], "NIFTY")
+        row = {"symbol": "NIFTY", "price": 25748.0, "nearest_support": 25650.0,
+               "nearest_resistance": 25800.0, "pdh": 25800.0, "pdl": 25550.0,
+               "entry": 25730.0, "stop": 25702.5, "atr_stop": None,
+               "target": 25785.0, "signal": "long"}
+        with patch.object(levels_mod, "scan_levels",
+                          return_value={"run_at_ist": "2026-11-26 12:00:00 IST",
+                                        "levels": [row], "failed": []}):
+            out = app_mod._api_levels({}, "en")
+        self.assertIn("NIFTY", out["html"])
+        self.assertEqual(out["top_symbol"], "NIFTY")
+
+
+class TestLocalCharts(unittest.TestCase):
+    """Chart library is bundled locally; SVG fallback when it cannot load."""
+
+    def test_local_bundle_exists_and_is_lightweight_charts(self):
+        path = Path(__file__).resolve().parent.parent / "web" / "static" / "lightweight-charts.js"
+        self.assertTrue(path.exists())
+        self.assertGreater(path.stat().st_size, 100_000)
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        self.assertIn("LightweightCharts", text)
+        self.assertIn("4.2.0", text)
+
+    def test_chart_lib_tag_prefers_local_bundle(self):
+        from web import app as app_mod
+        tag = app_mod._chart_lib_tag()
+        self.assertIn("/static/lightweight-charts.js", tag)
+        self.assertNotIn("unpkg", tag)
+
+    def test_static_file_serving_blocks_traversal(self):
+        from web import app as app_mod
+        served = app_mod._static_file("lightweight-charts.js")
+        self.assertIsNotNone(served)
+        data, ctype = served
+        self.assertGreater(len(data), 100_000)
+        self.assertIn("javascript", ctype)
+        self.assertIsNone(app_mod._static_file("../app.py"))
+        self.assertIsNone(app_mod._static_file("other.js"))
+        self.assertIsNone(app_mod._static_file(""))
+
+    def test_svg_fallback_present_in_chart_js(self):
+        from web import app as app_mod
+        js = app_mod._chart_js()
+        for needle in ("bhanuSvgLine", "bhanuSvgCandles", "bhanuSvgFlow",
+                       "typeof LightweightCharts==='undefined'",
+                       "Simple chart view"):
+            self.assertIn(needle, js)
+
+
+class TestIntradayRobustness(unittest.TestCase):
+    """The intraday fetch must never block a page for ~90s again:
+    10s timeout, retry, and a stale disk cache as fallback."""
+
+    def _yahoo_payload(self, frame):
+        ts = [int(t.timestamp()) for t in frame.index]
+        return {"chart": {"result": [{
+            "timestamp": ts,
+            "indicators": {"quote": [{
+                "open": [float(v) for v in frame["open"]],
+                "high": [float(v) for v in frame["high"]],
+                "low": [float(v) for v in frame["low"]],
+                "close": [float(v) for v in frame["close"]],
+                "volume": [float(v) for v in frame["volume"]],
+            }]},
+        }]}}
+
+    def test_fetch_timeout_is_10s(self):
+        import json as _json
+        from unittest.mock import patch
+        seen = {}
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return _json.dumps({"ok": True}).encode()
+
+        def fake_urlopen(req, timeout=None):
+            seen["timeout"] = timeout
+            return FakeResp()
+
+        self.assertEqual(data_mod.FETCH_TIMEOUT_S, 10)
+        with patch.object(data_mod.urllib.request, "urlopen",
+                          side_effect=fake_urlopen):
+            out = data_mod._get_json(
+                "https://query1.finance.yahoo.com/v8/finance/chart/X")
+        self.assertEqual(out, {"ok": True})
+        self.assertEqual(seen["timeout"], 10)
+
+    def test_stale_cache_served_when_live_fetch_fails(self):
+        import json as _json
+        import tempfile
+        from unittest.mock import patch
+        from datetime import datetime as _dt
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(data_mod, "CACHE_DIR", Path(tmp)):
+                key = "intraday_TESTSYM_5m_1d"
+                payload = {"saved_at": "2026-11-25T10:00:00",
+                           "data": self._yahoo_payload(_bars_5m())}
+                data_mod._write_cache(key, payload["data"])
+                # Make the cache look old by rewriting saved_at
+                # (yesterday, so it is expired in any timezone).
+                path = Path(tmp) / f"{key}.json"
+                path.write_text(_json.dumps(payload), encoding="utf-8")
+                with patch.object(data_mod, "_get_json",
+                                  side_effect=data_mod.DataError("Yahoo HTTP 500")):
+                    frame, stale, as_of = data_mod.fetch_intraday_bars_meta(
+                        "TESTSYM", interval="5m", days=1)
+                self.assertFalse(frame.empty)
+                self.assertEqual(len(frame), 6)
+                self.assertTrue(stale)
+                self.assertEqual(as_of, "2026-11-25T10:00:00")
+
+    def test_no_stale_cache_means_honest_error(self):
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(data_mod, "CACHE_DIR", Path(tmp)):
+                with patch.object(data_mod, "_get_json",
+                                  side_effect=data_mod.DataError("Yahoo HTTP 500")):
+                    with self.assertRaises(data_mod.DataError):
+                        data_mod.fetch_intraday_bars("TESTSYM", interval="5m", days=1)
+                    payload = charts_mod.intraday_series("TESTSYM")
+        self.assertEqual(payload["candles"], [])
+        self.assertIn("500", payload["error"])
+
+    def test_intraday_series_marks_stale_bars(self):
+        from unittest.mock import patch
+        with patch.object(charts_mod, "fetch_intraday_bars_meta",
+                          return_value=(_bars_5m(), True, "2026-11-26 10:00:00")):
+            payload = charts_mod.intraday_series("^NSEI")
+        self.assertEqual(len(payload["candles"]), 6)
+        self.assertTrue(payload["stale"])
+        self.assertEqual(payload["as_of"], "2026-11-26 10:00:00")
 
 
 if __name__ == "__main__":

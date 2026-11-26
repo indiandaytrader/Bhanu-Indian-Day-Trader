@@ -45,6 +45,7 @@ from bhanu.data import (
     UNIVERSE,
     DataError,
     fetch_intraday_bars,
+    fetch_intraday_bars_meta,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -133,19 +134,26 @@ def bars_to_pct_line(bars: pd.DataFrame) -> list[dict[str, Any]]:
 def intraday_series(yahoo_symbol: str, days: int = 1) -> dict[str, Any]:
     """Candles + close line for ``yahoo_symbol`` (today by default).
 
-    Returns ``{"symbol", "candles", "line", "error"}`` — ``error`` is a
-    string when the fetch failed, and then candles/line are empty.
+    Returns ``{"symbol", "candles", "line", "error", "stale", "as_of"}``
+    — ``error`` is a string when the fetch failed, and then
+    candles/line are empty. ``stale`` is True when the bars came from
+    an expired disk cache because the live fetch failed (real data,
+    just older); ``as_of`` is that cache's save time.
     """
     try:
-        bars = fetch_intraday_bars(yahoo_symbol, interval="5m", days=days)
+        bars, stale, as_of = fetch_intraday_bars_meta(
+            yahoo_symbol, interval="5m", days=days)
     except DataError as exc:
-        return {"symbol": yahoo_symbol, "candles": [], "line": [], "error": str(exc)}
+        return {"symbol": yahoo_symbol, "candles": [], "line": [],
+                "error": str(exc), "stale": False, "as_of": ""}
     if bars.empty:
         return {
             "symbol": yahoo_symbol,
             "candles": [],
             "line": [],
             "error": "no intraday bars returned",
+            "stale": False,
+            "as_of": "",
         }
     today = structure_mod.session_bars_today(bars)
     return {
@@ -153,6 +161,8 @@ def intraday_series(yahoo_symbol: str, days: int = 1) -> dict[str, Any]:
         "candles": bars_to_candles(today),
         "line": bars_to_line(today),
         "error": None,
+        "stale": stale,
+        "as_of": as_of,
     }
 
 

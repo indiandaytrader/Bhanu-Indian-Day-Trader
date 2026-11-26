@@ -9,9 +9,10 @@ What it shows (per index: NIFTY, BANKNIFTY, SENSEX)
   high/low (09:15-09:30 IST).
 * PDH / PDL, ORB high / ORB low.
 * The ORB signal for today (from ``bhanu.scanner``) with entry, stop
-  (range midpoint, with the 1.5x ATR stop alongside) and 2R target
-  (from ``bhanu.entry`` / ``bhanu.exit``) — so a trader sees at a glance
-  "enter here, exit here, support here, resistance here".
+  (range midpoint, with the 1.5x ATR stop alongside) and targets
+  TP1/TP2/TP3 (1R/2R/3R; ``target`` is TP2) from ``bhanu.entry`` /
+  ``bhanu.exit`` — so a trader sees at a glance "enter here, exit
+  here, support here, resistance here".
 
 Sources and honesty
 -------------------
@@ -211,6 +212,7 @@ def compute_levels(
     # ORB signal + entry/exit (reuse the existing entry/exit rules).
     signal: str | None = None
     entry = stop = atr_stop = target = None
+    tp1 = tp2 = tp3 = None
     hit = scanner_mod.orb_hit(today_bars)
     if hit is not None:
         signal = hit["direction"]
@@ -221,6 +223,9 @@ def compute_levels(
             entry = plan.entry
             stop = plan.stop
             target = plan.target
+            tp1 = plan.tp1
+            tp2 = plan.tp2
+            tp3 = plan.tp3
             if atr is not None and plan.range_high and plan.range_low:
                 try:
                     atr_plan = exit_mod.compute_exit(
@@ -252,6 +257,9 @@ def compute_levels(
         "stop": stop,
         "atr_stop": atr_stop,
         "target": target,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
         "date": str(today),
     }
 

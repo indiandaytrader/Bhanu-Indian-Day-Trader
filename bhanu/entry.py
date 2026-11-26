@@ -53,7 +53,10 @@ class OrbPlan:
     trigger_time: datetime            # start of the trigger bar (IST)
     entry: float                      # entry price (= trigger close)
     stop: Optional[float] = None      # structural stop (range midpoint, or-mid)
-    target: Optional[float] = None    # target at the configured R:R
+    target: Optional[float] = None    # target at the configured R:R (= TP2)
+    tp1: Optional[float] = None       # 1R target
+    tp2: Optional[float] = None       # 2R target (= target)
+    tp3: Optional[float] = None       # 3R target
     status: str = "planned"           # "planned" | "late" | "exit_refused"
     late_entry: bool = False          # True when the trigger came after 12:00
 
@@ -183,10 +186,16 @@ def plan_orb_entry(
         )
         plan.stop = exit_plan.stop
         plan.target = exit_plan.target
+        plan.tp1 = exit_plan.tp1
+        plan.tp2 = exit_plan.tp2
+        plan.tp3 = exit_plan.tp3
     except ValueError as exc:
         plan.status = "exit_refused"
         plan.stop = None
         plan.target = None
+        plan.tp1 = None
+        plan.tp2 = None
+        plan.tp3 = None
         LAST_NO_TRIGGER_REASON = f"trigger found but exit refused: {exc}"
     return plan
 

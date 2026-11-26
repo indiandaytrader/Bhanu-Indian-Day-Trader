@@ -105,7 +105,9 @@ Then open http://localhost:8810.
 
 ## Dashboard pages
 
-Charts upar, tables neeche — koi page sirf tables ka nahi. Charts TradingView Lightweight Charts (CDN) se bante hain; data page me JSON ke roop me hota hai. CDN ya data na mile to page honestly "chart unavailable" dikhata hai — fake chart kabhi nahi.
+Charts upar, tables neeche — koi page sirf tables ka nahi. Charts TradingView Lightweight Charts se bante hain — library repo me hi bundled hai (`web/static/lightweight-charts.js`), CDN par depend nahi karti; library na load ho to built-in SVG chart dikhta hai, khaali box kabhi nahi.
+
+**Live + fast:** har page turant khulta hai (koi server fetch page ko block nahi karta — quotes, charts, scans, news, Time Machine sab `/api/*` se page ke baad load hote hain, "loading" state ke saath). Chart pages har **60 second** me auto-refresh hote hain — charts page khulte hi data ke saath bante hain aur har 60s me update hote rehte hain (line ka aakhri point aage badhta dikhta hai); upar **"● LIVE — last update HH:MM:SS"** indicator har successful refresh par update hota hai. Fetch fail ho to purana data dikhta rahta hai aur card me "retry ho raha hai" dikhta hai — khaali ya fake data kabhi nahi.
 
 - **/ — Home** — (a) index quotes + NIFTY / BANKNIFTY / SENSEX intraday line charts, (b) Smart Money Flow chart — saare 39 symbols ki intraday % change lines ek hi chart par (green = up, red = down, blue = NIFTY), (c) Sector Map bubble chart, (d) News Feed — bot khud check karke dikhata hai (source + time ke saath), (e) ORB hits table.
 - **/orb — ORB Scanner + candlestick chart** — top hit ka candlestick chart: VWAP line, swing highs/lows markers, CHoCH/BOS labels, order-block aur fair-value-gap boxes, entry/SL/TP boxes (green target, red stop), PDH/PDL aur ORB range lines. Symbol switcher se kisi bhi hit ka chart dekho.
