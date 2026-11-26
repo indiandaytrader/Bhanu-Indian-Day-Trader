@@ -1428,10 +1428,10 @@ def _index_cards_html(lang: str = "hi") -> str:
 
 
 def _news_feed_html(lang: str, news: dict | None = None) -> str:
-    """Prominent news feed section (bot checked, automatic).
+    """Prominent news feed section (automatic, real-time).
 
-    Each headline is a card row with source + time and a "Bot ne check
-    kiya" label. Used on home and /skills. A failed fetch shows an
+    Each headline is a card row with source + time and a "Real-time
+    check" label. Used on home and /skills. A failed fetch shows an
     honest "unavailable" — never an empty or fake feed. When the live
     engine has a warmed news check, pass it in (``news``) so the page
     never waits on a fresh fetch.
@@ -1442,19 +1442,25 @@ def _news_feed_html(lang: str, news: dict | None = None) -> str:
             news = _cached("news:NIFTY", 300, lambda: news_mod.check_symbol("NIFTY"))
         except Exception as exc:  # noqa: BLE001
             return (
-                f"<div class='card'><h3>{t('news')} — News Feed</h3>"
-                f"<p class='muted'>Bot ne abhi check kiya — News unavailable ({_esc(exc)})</p></div>"
+                f"<div class='card'><h3>{t('news_feed')}</h3>"
+                f"<p class='muted'>Real-time check — News unavailable ({_esc(exc)})</p></div>"
             )
     latest = news.get("latest", [])[:8]
     sources = news.get("sources", {}) or {}
+    # The Marketaux note already starts with "Marketaux: ..." — strip
+    # that prefix so the line does not read "Marketaux: Marketaux: ...".
+    mx_status = sources.get('marketaux', 'unavailable')
+    if mx_status.startswith("Marketaux: "):
+        mx_status = mx_status[len("Marketaux: "):]
     source_line = (
-        f"Bot ne abhi check kiya — NSE announcements: "
+        f"Real-time check — NSE announcements: "
         f"{sources.get('nse_announcements', 'unavailable')}; "
-        f"Yahoo headlines: {sources.get('yahoo_headlines', 'unavailable')}."
+        f"Yahoo headlines: {sources.get('yahoo_headlines', 'unavailable')}; "
+        f"Marketaux: {mx_status}."
     )
     if not latest:
         return (
-            f"<div class='card'><h3>{t('news')} — News Feed</h3>"
+            f"<div class='card'><h3>{t('news_feed')}</h3>"
             f"<p class='muted'>{_esc(source_line)}</p>"
             f"<p>News unavailable right now — no headlines returned.</p></div>"
         )
@@ -1463,6 +1469,8 @@ def _news_feed_html(lang: str, news: dict | None = None) -> str:
         f"<span class='muted'>{_esc(it.get('source', ''))}"
         + (f" · {_esc(it.get('published', ''))}" if it.get("published") else "")
         + (f" · {', '.join(it.get('tags', []))}" if it.get("tags") else "")
+        + (f" · sentiment {it['sentiment']:+.2f}"
+           if isinstance(it.get("sentiment"), (int, float)) else "")
         + "</span></div>"
         for it in latest
     )
@@ -1475,7 +1483,7 @@ def _news_feed_html(lang: str, news: dict | None = None) -> str:
         f"(moving &ge;3%: {news.get('moving')}).</p>"
     )
     return (
-        f"<div class='card'><h3>{t('news')} — News Feed</h3>"
+        f"<div class='card'><h3>{t('news_feed')}</h3>"
         f"<p class='muted'>{_esc(source_line)}</p>{items}{fresh_line}</div>"
     )
 
@@ -1623,9 +1631,9 @@ def home(lang: str) -> str:
         "<div class='hz-side' id='sector-map-list'></div></div>"
         "<p class='muted'><a href='/sectors'>Full sector page</a>.</p></div>"
     )
-    # (d) News feed (prominent section, bot-checked) — lazy.
+    # (d) News feed (prominent section, real-time) — lazy.
     news_html = (
-        f"<div id='news-feed'><div class='card'><h3>NEWS</h3>"
+        f"<div id='news-feed'><div class='card'><h3>{t('news_feed')}</h3>"
         f"<p class='loading'>News load ho raha hai…</p></div></div>"
     )
     # (e) ORB hits — lazy (top 10).

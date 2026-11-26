@@ -138,6 +138,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "No trade today",
         "hi": "Aaj koi trade nahi",
     },
+    "news_feed": {
+        "en": "REAL TIME NEWS FEED",
+        "hi": "रियल टाइम न्यूज़ फीड",
+    },
 }
 
 __all__ = ["STRINGS", "LANGUAGES", "t"]

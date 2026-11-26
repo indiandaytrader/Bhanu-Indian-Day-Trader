@@ -412,6 +412,7 @@ class TestNews(unittest.TestCase):
                 patch.object(news_mod, "fetch_nse_announcements", return_value=(nse_items, "")),
                 patch.object(news_mod, "fetch_yahoo_headlines", return_value=(yahoo_items, "")),
                 patch.object(news_mod, "fetch_bse_announcements", return_value=([], "bse note")),
+                patch.object(news_mod, "fetch_marketaux_news", return_value=([], "no key")),
                 patch("bhanu.data.fetch_quote", return_value={
                     "price": 25900.0, "prev_close": 25800.0, "change_pct": 0.39,
                 }),
@@ -463,6 +464,271 @@ class TestNews(unittest.TestCase):
         self.assertEqual(note, "")
 
 
+class TestMarketaux(unittest.TestCase):
+    """Marketaux news + entity sentiment (optional, key-gated)."""
+
+    def setUp(self):
+        # Fresh fetcher state per test (cache, backoff, daily counter).
+        news_mod._MARKETAUX_CACHE.clear()
+        news_mod._MARKETAUX_BACKOFF_UNTIL = 0.0
+        news_mod._MARKETAUX_DAY = ""
+        news_mod._MARKETAUX_COUNT = 0
+
+    def _payload(self):
+        import json as _json
+        return _json.dumps({
+            "meta": {"found": 2, "returned": 2, "limit": 3, "page": 1},
+            "data": [
+                {"uuid": "a1",
+                 "title": "Reliance shares plunge on fraud probe fears",
+                 "url": "https://example.com/a1",
+                 "published_at": "2026-11-26T08:00:00.000000Z",
+                 "source": "example.com",
+                 "entities": [{"symbol": "RELIANCE",
+                              "name": "Reliance Industries",
+                              "match_score": 12.0,
+                              "sentiment_score": -0.65}]},
+                {"uuid": "a2",
+                 "title": "Nifty at record high as banks surge",
+                 "url": "https://example.com/a2",
+                 "published_at": "2026-11-26T09:00:00.000000Z",
+                 "source": "example.com",
+                 "entities": [{"symbol": "RELIANCE",
+                              "name": "Reliance Industries",
+                              "match_score": 9.0,
+                              "sentiment_score": 0.8}]},
+            ],
+        }).encode("utf-8")
+
+    def test_fetch_success_maps_sentiment(self):
+        import os
+        from unittest.mock import patch
+        seen_urls = []
+
+        def fake_get(url, headers=None):
+            seen_urls.append(url)
+            return self._payload()
+
+        with patch.dict(os.environ, {"MARKETAUX_API_KEY": "test-key-123"}):
+            with patch.object(news_mod, "_http_get", side_effect=fake_get):
+                items, note = news_mod.fetch_marketaux_news("RELIANCE")
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["source"], "Marketaux")
+        self.assertEqual(items[0]["sentiment"], -0.65)
+        self.assertEqual(items[1]["sentiment"], 0.8)
+        self.assertEqual(items[0]["published"], "26 Nov 2026 08:00 UTC")
+        self.assertIn("legal", items[0]["tags"])  # "fraud" keyword
+        self.assertEqual(note, "")
+        # Free-plan discipline: 3 articles max, India only, symbols
+        # filter on; the key is in the URL (never in the note).
+        self.assertIn("symbols=RELIANCE", seen_urls[0])
+        self.assertIn("filter_entities=true", seen_urls[0])
+        self.assertIn("limit=3", seen_urls[0])
+        self.assertIn("countries=in", seen_urls[0])
+        self.assertNotIn("test-key-123", note)
+
+    def test_index_query_uses_search_not_symbols(self):
+        import os
+        from unittest.mock import patch
+        seen = []
+
+        def fake_get(url, headers=None):
+            seen.append(url)
+            return self._payload()
+
+        with patch.dict(os.environ, {"MARKETAUX_API_KEY": "k"}):
+            with patch.object(news_mod, "_http_get", side_effect=fake_get):
+                news_mod.fetch_marketaux_news("NIFTY")
+        self.assertIn("search=NIFTY+50", seen[0])
+        self.assertNotIn("symbols=", seen[0])
+
+    def test_no_key_returns_note_without_http(self):
+        import os
+        from unittest.mock import Mock, patch
+        http = Mock(side_effect=AssertionError("must not call HTTP"))
+        with patch.dict(os.environ, {"MARKETAUX_API_KEY": ""}):
+            with patch.object(news_mod, "_http_get", http):
+                items, note = news_mod.fetch_marketaux_news("NIFTY")
+        self.assertEqual(items, [])
+        self.assertEqual(note, "Marketaux: no API key configured")
+        http.assert_not_called()
+
+    def test_429_sets_backoff(self):
+        import os
+        import urllib.error
+        from unittest.mock import Mock, patch
+        err = urllib.error.HTTPError(
+            "https://api.marketaux.com/v1/news/all", 429,
+            "Too Many Requests", None, None)
+        http = Mock(side_effect=err)
+        with patch.dict(os.environ, {"MARKETAUX_API_KEY": "k"}):
+            with patch.object(news_mod, "_http_get", http):
+                items, note = news_mod.fetch_marketaux_news("NIFTY")
+                self.assertEqual(items, [])
+                self.assertIn("rate limited (HTTP 429)", note)
+                self.assertEqual(http.call_count, 1)
+                # Second call, cache cleared so the backoff branch runs:
+                # no HTTP at all.
+                news_mod._MARKETAUX_CACHE.clear()
+                items2, note2 = news_mod.fetch_marketaux_news("NIFTY")
+        self.assertEqual(items2, [])
+        self.assertIn("backing off until", note2)
+        self.assertEqual(http.call_count, 1)
+
+    def test_cache_within_ttl(self):
+        import os
+        from unittest.mock import patch
+        http_calls = []
+
+        def fake_get(url, headers=None):
+            http_calls.append(url)
+            return self._payload()
+
+        with patch.dict(os.environ, {"MARKETAUX_API_KEY": "k"}):
+            with patch.object(news_mod, "_http_get", side_effect=fake_get):
+                first, _ = news_mod.fetch_marketaux_news("RELIANCE")
+                second, _ = news_mod.fetch_marketaux_news("RELIANCE")
+        self.assertEqual(len(http_calls), 1)
+        self.assertEqual(first, second)
+
+    def test_daily_cap_stops_fetches(self):
+        import os
+        from datetime import datetime, timezone
+        from unittest.mock import Mock, patch
+        news_mod._MARKETAUX_DAY = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        news_mod._MARKETAUX_COUNT = 90
+        http = Mock(side_effect=AssertionError("must not call HTTP"))
+        with patch.dict(os.environ, {"MARKETAUX_API_KEY": "k"}):
+            with patch.object(news_mod, "_http_get", http):
+                items, note = news_mod.fetch_marketaux_news("NIFTY")
+        self.assertEqual(items, [])
+        self.assertIn("daily free-tier limit reached", note)
+        http.assert_not_called()
+
+    def _mx_result(self, title, sentiment):
+        return {"latest": [{
+            "source": "Marketaux", "title": title, "link": "",
+            "published": "", "tags": [], "sentiment": sentiment}]}
+
+    def test_signal_prefers_api_sentiment_over_keywords(self):
+        # Title is keyword-negative ("fraud probe", "plunge") but the
+        # API scored it positive — the API wins: supports a long.
+        factor = signal_mod.news_factor(
+            "NIFTY", "long", news_result=self._mx_result(
+                "Company faces fraud probe, shares plunge", 0.8))
+        self.assertEqual(factor["verdict"], "support")
+        self.assertEqual(factor["for"][0]["sentiment_from"], "marketaux")
+        # Title is keyword-positive but the API scored it negative.
+        factor = signal_mod.news_factor(
+            "NIFTY", "long", news_result=self._mx_result(
+                "Company profit surges to a record", -0.8))
+        self.assertEqual(factor["verdict"], "block")
+        self.assertEqual(factor["against"][0]["sentiment_from"], "marketaux")
+        # Near-zero API score is neutral — it does not borrow the
+        # keywords; the item simply votes neither way.
+        factor = signal_mod.news_factor(
+            "NIFTY", "long", news_result=self._mx_result(
+                "Company profit surges to a record", 0.02))
+        self.assertEqual(factor["verdict"], "neutral")
+        # No API score at all — keyword fallback (existing behaviour).
+        factor = signal_mod.news_factor(
+            "NIFTY", "long", news_result=self._mx_result(
+                "Company faces fraud probe, shares plunge", None))
+        self.assertEqual(factor["verdict"], "block")
+        self.assertEqual(factor["against"][0]["sentiment_from"], "keyword")
+
+    def test_exit_signal_prefers_api_sentiment(self):
+        out = signal_mod.exit_signal(
+            "NIFTY", "long", 25730.0, news_result=self._mx_result(
+                "Company faces fraud probe, shares plunge", 0.8))
+        self.assertEqual(out["action"], "HOLD")
+
+    def test_check_symbol_merges_marketaux(self):
+        import tempfile
+        from unittest.mock import patch
+        from pathlib import Path
+        nse_items = [{"source": "NSE announcement", "title": "Reliance Q2 results",
+                      "link": "https://example.com", "published": "26-Nov-2026",
+                      "tags": ["earnings"], "sentiment": None}]
+        mx_items = [{"source": "Marketaux", "title": "Reliance gains",
+                     "link": "https://example.com/mx",
+                     "published": "26 Nov 2026 08:00 UTC",
+                     "tags": [], "sentiment": 0.7}]
+        yahoo_items = [{"source": "Yahoo headline", "title": "Nifty flat",
+                        "link": "https://example.com/2", "published": "26 Nov 2026",
+                        "tags": [], "sentiment": None}]
+        with tempfile.TemporaryDirectory() as td:
+            patches = [
+                patch.object(news_mod, "STATE_PATH", Path(td) / "news_state.json"),
+                patch.object(news_mod, "fetch_nse_announcements",
+                             return_value=(nse_items, "")),
+                patch.object(news_mod, "fetch_bse_announcements",
+                             return_value=([], "bse note")),
+                patch.object(news_mod, "fetch_marketaux_news",
+                             return_value=(mx_items, "")),
+                patch.object(news_mod, "fetch_yahoo_headlines",
+                             return_value=(yahoo_items, "")),
+                patch("bhanu.data.fetch_quote", return_value={
+                    "price": 25900.0, "prev_close": 25800.0, "change_pct": 0.39}),
+            ]
+            for p in patches:
+                p.start()
+            try:
+                result = news_mod.check_symbol("NIFTY")
+            finally:
+                for p in patches:
+                    p.stop()
+        self.assertEqual(result["sources"]["marketaux"], "1 item(s)")
+        self.assertEqual(len(result["items"]), 3)
+        self.assertEqual(result["latest"][0]["source"], "NSE announcement")
+        self.assertEqual(result["latest"][1]["source"], "Marketaux")
+        self.assertEqual(result["latest"][1]["sentiment"], 0.7)
+
+    def _check(self, symbol, change_pct, td, marketaux=None):
+        from unittest.mock import patch
+        from pathlib import Path
+        patches = [
+            patch.object(news_mod, "STATE_PATH", Path(td) / "news_state.json"),
+            patch.object(news_mod, "fetch_nse_announcements", return_value=([], "")),
+            patch.object(news_mod, "fetch_bse_announcements",
+                         return_value=([], "bse note")),
+            patch.object(news_mod, "fetch_yahoo_headlines", return_value=([], "")),
+            patch("bhanu.data.fetch_quote", return_value={
+                "price": 100.0, "prev_close": 100.0, "change_pct": change_pct}),
+        ]
+        mx_patcher = patch.object(news_mod, "fetch_marketaux_news",
+                                  return_value=([], ""))
+        for p in patches:
+            p.start()
+        mx_mock = mx_patcher.start()
+        try:
+            return news_mod.check_symbol(symbol, marketaux=marketaux), mx_mock
+        finally:
+            for p in patches:
+                p.stop()
+            mx_patcher.stop()
+
+    def test_check_symbol_skips_marketaux_for_quiet_stock(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            result, mx = self._check("RELIANCE", 0.5, td)
+        mx.assert_not_called()
+        self.assertIn("skipped", result["sources"]["marketaux"])
+
+    def test_check_symbol_uses_marketaux_for_moving_stock(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            result, mx = self._check("RELIANCE", 3.5, td)
+        mx.assert_called_once()
+        self.assertEqual(result["sources"]["marketaux"], "0 item(s)")
+
+    def test_check_symbol_marketaux_param_forces_fetch(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            _result, mx = self._check("RELIANCE", 0.5, td, marketaux=True)
+        mx.assert_called_once()
+
+
 class TestTimecheck(unittest.TestCase):
     def test_trade_check_offline(self):
         setup = {
@@ -505,7 +771,7 @@ class TestTimecheck(unittest.TestCase):
 
 
 class TestDashboardNews(unittest.TestCase):
-    """Home page shows headlines AUTOMATICALLY (bot checked) — no manual check."""
+    """Home page shows headlines AUTOMATICALLY (real-time) — no manual check."""
 
     def _mock_news(self):
         return {
@@ -521,6 +787,9 @@ class TestDashboardNews(unittest.TestCase):
             "latest": [
                 {"source": "Yahoo headline", "title": "Nifty rallies on FII buying",
                  "link": "https://example.com/1", "published": "26 Nov 2026", "tags": []},
+                {"source": "Marketaux", "title": "Reliance gains on strong refining margins",
+                 "link": "https://example.com/3", "published": "26 Nov 2026 08:00 UTC",
+                 "tags": [], "sentiment": 0.8},
                 {"source": "Yahoo headline", "title": "RBI keeps repo rate unchanged",
                  "link": "https://example.com/2", "published": "26 Nov 2026", "tags": []},
             ],
@@ -528,6 +797,7 @@ class TestDashboardNews(unittest.TestCase):
                 "nse_announcements": "NSE announcements unavailable: HTTP Error 403: Forbidden",
                 "bse_announcements": "BSE announcements need a BSE scrip code",
                 "yahoo_headlines": "5 item(s)",
+                "marketaux": "no API key configured",
             },
             "quote_error": "",
         }
@@ -545,9 +815,40 @@ class TestDashboardNews(unittest.TestCase):
         # Headlines are visible without the user doing anything.
         self.assertIn("Nifty rallies on FII buying", out["html"])
         self.assertIn("RBI keeps repo rate unchanged", out["html"])
-        # Bot language, and the blocked NSE source is stated honestly.
-        self.assertIn("Bot ne abhi check kiya", out["html"])
+        # Heading is REAL TIME NEWS FEED (Hindi here) — no "bot"
+        # wording anywhere in the news section; the blocked NSE source
+        # is stated honestly.
+        self.assertIn("रियल टाइम न्यूज़ फीड", out["html"])
+        self.assertIn("Real-time check", out["html"])
+        self.assertNotIn("bot", out["html"].lower())
         self.assertIn("NSE announcements unavailable", out["html"])
+        # Marketaux status + sentiment show in the feed.
+        self.assertIn("Marketaux: no API key configured", out["html"])
+        self.assertIn("sentiment +0.80", out["html"])
+
+    def test_news_heading_english_and_empty_and_error_branches(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        # Empty feed branch (English heading).
+        empty = {"symbol": "NIFTY", "moving": False, "change_pct": 0.0,
+                 "tags": [], "items": [], "latest": [],
+                 "sources": {"nse_announcements": "0 item(s)",
+                             "bse_announcements": "bse note",
+                             "yahoo_headlines": "0 item(s)",
+                             "marketaux": "no API key configured"},
+                 "quote_error": ""}
+        html = app_mod._news_feed_html("en", news=empty)
+        self.assertIn("REAL TIME NEWS FEED", html)
+        self.assertIn("Marketaux: no API key configured", html)
+        self.assertNotIn("bot", html.lower())
+        # Error branch: the fetch raises.
+        app_mod._cache.clear()
+        with patch.object(news_mod, "check_symbol",
+                          side_effect=RuntimeError("down")):
+            err_html = app_mod._news_feed_html("en", news=None)
+        self.assertIn("REAL TIME NEWS FEED", err_html)
+        self.assertIn("Real-time check", err_html)
+        self.assertNotIn("bot", err_html.lower())
 
     def test_home_news_failure_is_honest(self):
         from unittest.mock import patch
@@ -867,7 +1168,7 @@ class TestChartPages(unittest.TestCase):
             news = app_mod._api_news({}, "hi")
         for needle in ("chart-nifty", "chart-bank", "chart-sensex",
                        "SMART MONEY", "flow-chart", "SECTOR MAP", "sector-map",
-                       "NEWS", "ORB Hits", "lightweight-charts"):
+                       "रियल टाइम न्यूज़ फीड", "ORB Hits", "lightweight-charts"):
             self.assertIn(needle, html)
         # The headline itself arrives via /api/news after the page loads.
         self.assertIn("Nifty rallies on FII buying", news["html"])

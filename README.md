@@ -11,7 +11,7 @@ DayTrader (US) batata hai America ke market me kab ghusna hai aur kab nikalna ha
 - **Entry / Exit signals** — range-midpoint ya 1.5x ATR stop, 2R target, 15:15 IST tak flat
 - **Position Sizing Calculator** — chaar limits se size nikalta hai; stop door ho to NO trade
 - **Monte Carlo Time Machine** — trade ko 10,000 baar replay karke honest odds batata hai (backtest, guarantee nahi)
-- **News Tracker** — bot khud NSE/BSE announcements aur India ki taaza headlines check karke dashboard par dikhata hai; tumko manually news dekhne ki zaroorat nahi — news ke baad hi trade karo
+- **News Tracker** — bot khud NSE/BSE announcements aur India ki taaza headlines check karke dashboard par dikhata hai; tumko manually news dekhne ki zaroorat nahi — news ke baad hi trade karo. Optional: free Marketaux key (`MARKETAUX_API_KEY`, marketaux.com se signup karke) se extra global news + har article ka sentiment score (-1 se +1) bhi aata hai
 - **Live Support / Resistance** — Nifty / Bank Nifty / Sensex ke live support-resistance levels, PDH/PDL aur ORB range ke saath — kahan se entry, kahan se exit, sab ek jagah
 - **Hinglish interface** — Hindi me samjho, English me trade karo
 - **Paper trading by default** — pehle paper par seekho; is repo se koi real order kabhi nahi lagta
@@ -29,7 +29,7 @@ Ye ek free, open-source dashboard hai Indian market ke liye. Isme hai:
 - **Entry / Exit rules** — range midpoint ya 1.5x ATR stop, 2R target, 15:15 IST tak flat
 - **Position Sizing Calculator** — chaar limits se size nikalta hai, aur stop door ho to mana kar deta hai
 - **Monte Carlo Time Machine** — trade ko 10,000 baar replay karke honest odds batata hai (backtest, guarantee nahi)
-- **News Tracker** — bot khud NSE/BSE announcements aur India ki taaza headlines check karke dashboard par dikhata hai; tumko manually news dekhne ki zaroorat nahi — news ke baad hi trade karo
+- **News Tracker** — bot khud NSE/BSE announcements aur India ki taaza headlines check karke dashboard par dikhata hai; tumko manually news dekhne ki zaroorat nahi — news ke baad hi trade karo. Optional: free Marketaux key (`MARKETAUX_API_KEY`, marketaux.com se signup karke) se extra global news + har article ka sentiment score (-1 se +1) bhi aata hai
 - **Paper Trading** — pehle paper par, real money kabhi nahi (is repo se koi real order nahi lagta)
 
 ## DayTrader se kya alag hai?

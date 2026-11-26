@@ -7,7 +7,8 @@ and so do the Time Machine replay and the trigger bar's volume:
   range). No trigger = no signal at all.
 * LEVELS — nearest support/resistance: a level sitting between the
   entry and TP1 means the move must clear it first (half size).
-* NEWS — keyword sentiment on fresh headlines. Fresh news AGAINST the
+* NEWS — API sentiment when present (Marketaux entity score, -1..+1),
+  else keyword sentiment on fresh headlines. Fresh news AGAINST the
   trade direction blocks the entry; fresh news FOR the direction
   supports it. News that cannot be fetched never blocks — the signal
   says so plainly ("news unavailable, price-only signal").
@@ -111,6 +112,41 @@ def score_headline(title: str) -> dict[str, Any]:
         "negative_words": neg,
         "positive_words": pos,
     }
+
+
+#: Marketaux sentiment is a float (-1..+1); this far from zero counts
+#: as a real direction. Near-zero scores are neutral.
+API_SENTIMENT_THRESHOLD = 0.05
+
+
+def _score_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Sentiment of one news item: API score wins, keywords fall back.
+
+    Marketaux items carry a numeric ``sentiment`` (-1..+1); >= +0.05 is
+    positive, <= -0.05 negative, near zero neutral. Items without a
+    numeric score use the keyword scorer. The returned dict has the
+    same ``sentiment`` / ``negative_words`` / ``positive_words`` shape
+    as :func:`score_headline`, plus ``sentiment_score`` (when from the
+    API) and ``sentiment_from`` ("marketaux" or "keyword").
+    """
+    api = item.get("sentiment")
+    if isinstance(api, (int, float)) and not isinstance(api, bool):
+        if api >= API_SENTIMENT_THRESHOLD:
+            sentiment = "positive"
+        elif api <= -API_SENTIMENT_THRESHOLD:
+            sentiment = "negative"
+        else:
+            sentiment = "neutral"
+        return {
+            "sentiment": sentiment,
+            "sentiment_score": float(api),
+            "sentiment_from": "marketaux",
+            "negative_words": [],
+            "positive_words": [],
+        }
+    scored = score_headline(item.get("title", ""))
+    scored["sentiment_from"] = "keyword"
+    return scored
 
 
 def _parse_published(text: str) -> datetime | None:
@@ -219,7 +255,7 @@ def news_factor(
     against: list[dict[str, Any]] = []
     supporting: list[dict[str, Any]] = []
     for item in fresh:
-        scored = score_headline(item.get("title", ""))
+        scored = _score_item(item)
         item = {**item, **scored}
         if scored["sentiment"] == "negative":
             (against if direction == "long" else supporting).append(item)
@@ -624,7 +660,7 @@ def exit_signal(
     fresh = _fresh_items(news_result)
     against: list[dict[str, Any]] = []
     for item in fresh:
-        scored = score_headline(item.get("title", ""))
+        scored = _score_item(item)
         item = {**item, **scored}
         bad = scored["sentiment"] == "negative" and direction == "long"
         bad = bad or (scored["sentiment"] == "positive" and direction == "short")

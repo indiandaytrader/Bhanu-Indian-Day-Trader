@@ -3,6 +3,11 @@ services:
     build: .
     ports:
       - "8810:8810"
+    environment:
+      # Optional: free Marketaux key for extra news + per-entity sentiment.
+      # Get one at https://www.marketaux.com (sign up, copy the API token),
+      # then: MARKETAUX_API_KEY=your_key docker compose up
+      - MARKETAUX_API_KEY=${MARKETAUX_API_KEY:-}
     volumes:
       - ./data:/app/data
     restart: unless-stopped
