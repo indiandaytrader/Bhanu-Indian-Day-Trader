@@ -1305,6 +1305,24 @@ function bhanuTimemachineLoad(){
     bhanuMCRefresh();
   }).catch(function(e){el.innerHTML='<p class=\"muted\">Time Machine load nahi ho paya — page refresh karein.</p>';});
 }
+function bhanuTmCheckSubmit(ev){
+  if(ev){ev.preventDefault();}
+  var f=document.getElementById('tm-check-form');
+  var out=document.getElementById('tm-check-result');
+  if(!f||!out){return false;}
+  var q='symbol='+encodeURIComponent(f.symbol.value)
+    +'&entry='+encodeURIComponent(f.entry.value)
+    +'&stop='+encodeURIComponent(f.stop.value)
+    +'&target='+encodeURIComponent(f.target.value)
+    +'&direction='+encodeURIComponent(f.direction.value);
+  out.innerHTML='<p class="loading">10,000 replays chal rahe hain…</p>';
+  fetch('/api/timemachine-check?'+q).then(function(r){if(!r.ok){throw new Error('check '+r.status);}return r.json();}).then(function(d){
+    if(d&&d.html){out.innerHTML=d.html;}
+    else{out.innerHTML='<p class="muted">Check nahi ho paya — '+((d&&d.error)?d.error:'dobara try karein')+'.</p>';}
+    if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
+  }).catch(function(e){out.innerHTML='<p class="muted">Check nahi ho paya — page refresh karke dobara try karein.</p>';});
+  return false;
+}
 function bhanuSkillsLoad(){
   var el=document.getElementById('skills-table');
   if(!el){return;}
@@ -2433,13 +2451,96 @@ def _timemachine_body(data: dict) -> str:
     return setup_html + mc_html + tc_html + bt_html
 
 
+def _tm_check_symbols() -> list[str]:
+    """Universe order for the Time Machine form dropdown: indices
+    first, then the F&O stocks alphabetically."""
+    return list(data_mod.INDICES) + sorted(data_mod.STOCKS)
+
+
+def _tm_check_result_html(result: dict) -> str:
+    """Result card for a user's own Time Machine check (the form's
+    answer) — Monte Carlo outcome + trade check, same bands and
+    wording as the auto setup's card."""
+    def _fmt(value) -> str:
+        return f"{value:,.2f}" if value is not None else "—"
+
+    mc = result.get("monte_carlo", {})
+    tc = result.get("trade_check", {})
+    head = (
+        f"<div class='card'><h3>Apna trade — {_esc(result.get('symbol', ''))} "
+        f"{_opt(result.get('direction', ''))}</h3>"
+        f"<p>Entry {_fmt(result.get('entry'))}, stop {_fmt(result.get('stop'))}, "
+        f"target {_fmt(result.get('target'))}.</p>"
+    )
+    if not mc.get("available"):
+        return head + f"<p>Monte Carlo unavailable — {_esc(mc.get('reason', 'no data'))}</p></div>"
+    hist_html = ""
+    if mc.get("histogram"):
+        hist_html = (
+            f"<div id='tm-check-hist'>{_mc_histogram_svg(mc['histogram'])}</div>"
+        )
+    body = (
+        hist_html
+        + f"<p>Monte Carlo — {mc['n']:,} replays, apne trade ke levels par.</p>"
+        f"<div class='table-wrap'><table><tr><th>Outcome</th><th>Share</th></tr>"
+        f"<tr><td>Target first (win)</td><td>{mc['target_first_pct']:.1f}%</td></tr>"
+        f"<tr><td>Stop first (loss)</td><td>{mc['stop_first_pct']:.1f}%</td></tr>"
+        f"<tr><td>Neither (flat by 15:15)</td><td>{mc['neither_pct']:.1f}%</td></tr></table></div>"
+        f"<p>Average outcome: {mc['avg_r']:+.2f}R. Best case (target hit): "
+        f"+{mc['best_case_r']:.1f}R. Worst case (stop hit): {mc['worst_case_r']:.1f}R. "
+        f"Verdict: {mc['verdict']} (break-even {mc['break_even_pct']:.1f}% "
+        f"target-first among decisive replays). "
+        f"Reality check only — resampled bars cannot see the future, and "
+        f"fees/slippage are ignored.</p>"
+    )
+    if tc.get("available"):
+        body += (
+            f"<p>Trade check — Risk gate: <b>{tc['gate_verdict']}</b>"
+            + (f" — {_esc(tc['gate_reason'])}" if tc.get("gate_reason") and tc["gate_reason"] != "ok" else "")
+            + f". Sizing: {tc['sizing_verdict']} — {_esc(tc['sizing_reason'])}.</p>"
+            f"<p>Qty {tc['qty']} (binding limit: {_esc(tc.get('binding_limit', ''))}), "
+            f"R:R {tc['rr']:.2f}, risk per unit {_fmt(tc.get('risk_per_unit'))}, "
+            f"position value ₹{tc['position_value']:,.2f}, max loss at stop "
+            f"₹{tc['max_loss']:,.2f}. Max {tc['positions_max']} aisi position(s) "
+            f"(budget ₹{tc['budget']:,.0f}).</p>"
+        )
+    else:
+        body += f"<p>Trade check unavailable — {_esc(tc.get('reason', 'no setup'))}</p>"
+    return head + body + "</div>"
+
+
 def timemachine_page(lang: str) -> str:
     """Time Machine page — renders INSTANTLY; the setup / Monte Carlo
     / trade check / backtest body loads lazily from /api/timemachine
-    (the 10,000-replay run is slow on a cold cache)."""
+    (the 10,000-replay run is slow on a cold cache). The user's own
+    trade-check form sits above the lazy body."""
     t = lambda k: i18n_mod.t(k, lang)
+    options = "".join(
+        f"<option value='{_esc(sym)}'{' selected' if sym == 'NIFTY' else ''}>{_esc(sym)}</option>"
+        for sym in _tm_check_symbols()
+    )
+    form = (
+        "<div class='card'><h3>Apna trade check karo — Time Machine</h3>"
+        "<p class='muted'>Apna entry, stop aur target daalo — wahi 10,000 replays "
+        "tumhare trade par chalenge (symbol ke apne last 60 din ke 5m bars par), "
+        "aur trade check bhi milega. Robot, signals ya scans par iska koi asar nahi.</p>"
+        "<form id='tm-check-form' method='get' action='/api/timemachine-check' "
+        "onsubmit='return bhanuTmCheckSubmit(event);'>"
+        f"Symbol <select name='symbol'>{options}</select> "
+        "Entry <input name='entry' inputmode='decimal' size='10' required> "
+        "Stop <input name='stop' inputmode='decimal' size='10' required> "
+        "Target <input name='target' inputmode='decimal' size='10' required> "
+        "<select name='direction' aria-label='Direction'>"
+        "<option value='long'>CALL</option><option value='short'>PUT</option></select> "
+        "<button type='submit'>Check karo — 10,000 replays</button></form>"
+        "<p class='muted'>Option ke liye premium series chahiye — ye form index/stock "
+        "levels ke liye hai. Option ka premium theta decay se girta hai, isliye spot "
+        "bars par uska replay galat hoga.</p>"
+        "<div id='tm-check-result'></div></div>"
+    )
     body = (
-        "<div id='timemachine-body'>"
+        form
+        + "<div id='timemachine-body'>"
         "<p class='loading'>Time Machine load ho raha hai…</p></div>"
     )
     return _page(
@@ -2736,6 +2837,36 @@ def _api_timemachine() -> dict:
             return {"error": str(exc)}
     out = dict(data)
     out["html"] = _timemachine_body(data)
+    return out
+
+
+def _api_timemachine_check(query: dict) -> dict:
+    """User's own trade through the Time Machine — the form's endpoint.
+
+    GET params: symbol, entry, stop, target, direction (CALL/PUT or
+    long/short). Read-only: reuses timecheck.check_trade, which replays
+    the symbol's own 5m bars and runs the same trade check — zero
+    effect on the robot, signals, scans or poller. The check is cached
+    5 minutes per exact input so a double submit does not re-run
+    10,000 replays. Always returns a 200 JSON with ok True/False —
+    never a 500 on bad input."""
+    symbol = (query.get("symbol") or [""])[0]
+    entry = (query.get("entry") or [""])[0]
+    stop = (query.get("stop") or [""])[0]
+    target = (query.get("target") or [""])[0]
+    direction = (query.get("direction") or [""])[0]
+    if not symbol or entry == "" or stop == "" or target == "" or not direction:
+        return {"ok": False, "error": "symbol, entry, stop, target aur direction — sab bharo."}
+    try:
+        result = _cached(
+            f"tmcheck:{symbol}:{entry}:{stop}:{target}:{direction}", 300,
+            lambda: timecheck_mod.check_trade(symbol, entry, stop, target, direction))
+    except Exception as exc:  # noqa: BLE001 - bad input must not 500
+        return {"ok": False, "error": str(exc)}
+    if not result.get("ok"):
+        return {"ok": False, "error": result.get("error", "check nahi ho paya")}
+    out = dict(result)
+    out["html"] = _tm_check_result_html(result)
     return out
 
 
@@ -3127,6 +3258,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/timemachine":
                 self._send_json(_api_timemachine())
+                return
+            if parsed.path == "/api/timemachine-check":
+                self._send_json(_api_timemachine_check(query))
                 return
             if parsed.path == "/api/orb":
                 self._send_json(_api_orb(query, lang))

@@ -110,7 +110,7 @@ def monte_carlo_summary(setup: dict[str, Any]) -> dict[str, Any]:
             "available": False,
             "reason": "no ORB setup to replay (no entry/stop/target today)",
         }
-    yahoo_symbol = data_mod.INDICES.get(symbol, "^NSEI")
+    yahoo_symbol = data_mod.UNIVERSE.get(symbol, "^NSEI")
     try:
         bars = data_mod.fetch_intraday_bars(yahoo_symbol, interval="5m", days=60)
     except Exception as exc:  # noqa: BLE001
@@ -157,6 +157,90 @@ def monte_carlo_summary(setup: dict[str, Any]) -> dict[str, Any]:
         "edge_pts": v["edge_pts"],
         "break_even_pct": v["break_even_pct"],
         "histogram": histogram,
+    }
+
+
+# ---------------------------------------------------------------------------
+# User's own trade check (Time Machine form)
+# ---------------------------------------------------------------------------
+
+#: Direction aliases accepted by the form: display CALL/PUT map to the
+#: internal 'long'/'short' — internal values never change anywhere.
+_DIRECTION_ALIASES = {
+    "long": "long",
+    "call": "long",
+    "short": "short",
+    "put": "short",
+}
+
+
+def check_trade(symbol, entry, stop, target, direction) -> dict[str, Any]:
+    """Run the user's own trade through the same 10,000-replay Time
+    Machine as the auto setup (``monte_carlo_summary``) plus the same
+    trade check (``trade_check``).
+
+    Read-only and isolated: it never touches the robot, signals, scans
+    or the poller. Returns ``{"ok": True, ...}`` on success or
+    ``{"ok": False, "error": ...}`` on any problem — never raises for
+    bad input.
+
+    Validation rules (in order):
+    * symbol must be in the universe (3 indices + 39 F&O stocks);
+      anything else — including option symbols — is refused, because
+      the replay runs on the symbol's own spot/index bars and an
+      option premium needs its own premium series (theta decay makes
+      spot-bar replays meaningless for premium outcomes).
+    * entry, stop, target must be finite positive numbers.
+    * direction must be CALL/long or PUT/short.
+    * CALL (long): stop < entry < target.
+    * PUT (short): target < entry < stop.
+    """
+    raw_symbol = "" if symbol is None else str(symbol).strip().upper()
+    if not raw_symbol or raw_symbol not in data_mod.UNIVERSE:
+        return {
+            "ok": False,
+            "error": f"unknown symbol {raw_symbol or '(blank)'} — "
+                     "sirf index ya F&O stock chunna hai (NIFTY, BANKNIFTY, "
+                     "SENSEX ya 39 F&O stocks me se)",
+        }
+    try:
+        entry_f = float(entry)
+        stop_f = float(stop)
+        target_f = float(target)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "entry, stop aur target number hone chahiye"}
+    if not all(math.isfinite(v) for v in (entry_f, stop_f, target_f)):
+        return {"ok": False, "error": "entry, stop aur target number hone chahiye"}
+    if entry_f <= 0 or stop_f <= 0 or target_f <= 0:
+        return {"ok": False, "error": "entry, stop aur target positive prices hone chahiye"}
+    direction_key = "" if direction is None else str(direction).strip().lower()
+    if direction_key not in _DIRECTION_ALIASES:
+        return {"ok": False, "error": "direction CALL ya PUT hona chahiye"}
+    direction = _DIRECTION_ALIASES[direction_key]
+    if direction == "long" and not stop_f < entry_f < target_f:
+        return {"ok": False, "error": "CALL ke liye stop < entry < target hona chahiye"}
+    if direction == "short" and not target_f < entry_f < stop_f:
+        return {"ok": False, "error": "PUT ke liye target < entry < stop hona chahiye"}
+    setup = {
+        "symbol": raw_symbol,
+        "signal": direction,
+        "entry": entry_f,
+        "stop": stop_f,
+        "target": target_f,
+    }
+    mc = monte_carlo_summary(setup)
+    if not mc.get("available"):
+        return {"ok": False, "error": mc.get("reason", "Monte Carlo unavailable")}
+    tc = trade_check(setup)
+    return {
+        "ok": True,
+        "symbol": raw_symbol,
+        "direction": direction,
+        "entry": entry_f,
+        "stop": stop_f,
+        "target": target_f,
+        "monte_carlo": mc,
+        "trade_check": tc,
     }
 
 

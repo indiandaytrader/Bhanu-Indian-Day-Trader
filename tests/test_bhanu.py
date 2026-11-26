@@ -770,6 +770,136 @@ class TestTimecheck(unittest.TestCase):
         self.assertIn("error", result)
 
 
+def _synthetic_mc_frame(sessions=25, seed=7):
+    """DataFrame of 5m bars with full 75-bar sessions (for MC tests)."""
+    bars = tm_mod.synthetic_bars(sessions=sessions, seed=seed)
+    idx = pd.DatetimeIndex([b["time"] for b in bars], tz=IST)
+    return pd.DataFrame(
+        {
+            "open": [b["open"] for b in bars],
+            "high": [b["high"] for b in bars],
+            "low": [b["low"] for b in bars],
+            "close": [b["close"] for b in bars],
+            "volume": [1000] * len(bars),
+        },
+        index=idx,
+    )
+
+
+class TestTimemachineCheck(unittest.TestCase):
+    """User's own trade through the Time Machine (the /timemachine form)."""
+
+    def _mock_bars(self):
+        from unittest.mock import patch
+        return patch.object(data_mod, "fetch_intraday_bars",
+                            return_value=_synthetic_mc_frame())
+
+    def test_check_valid_call(self):
+        with self._mock_bars():
+            result = timecheck_mod.check_trade("NIFTY", 25000, 24900, 25200, "long")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["direction"], "long")
+        mc = result["monte_carlo"]
+        self.assertTrue(mc["available"])
+        self.assertEqual(mc["n"], 10000)
+        total = mc["target_first_pct"] + mc["stop_first_pct"] + mc["neither_pct"]
+        self.assertAlmostEqual(total, 100.0, places=1)
+        self.assertIn(mc["verdict"], ("coin flip", "leans", "strongly",
+                                      "leans against", "strongly against"))
+        self.assertTrue(result["trade_check"]["available"])
+        self.assertGreater(result["trade_check"]["qty"], 0)
+
+    def test_check_valid_put_alias(self):
+        # "put" is accepted and stored internally as "short".
+        with self._mock_bars():
+            result = timecheck_mod.check_trade("NIFTY", 25000, 25100, 24800, "put")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["direction"], "short")
+        self.assertAlmostEqual(result["monte_carlo"]["reward_risk"], 2.0, places=1)
+
+    def test_check_invalid_sl_side(self):
+        # CALL needs stop below entry; stop above entry is refused.
+        result = timecheck_mod.check_trade("NIFTY", 25000, 25100, 25200, "long")
+        self.assertFalse(result["ok"])
+        self.assertIn("stop", result["error"].lower())
+
+    def test_check_invalid_tp_side(self):
+        # PUT needs target below entry; target above entry is refused.
+        result = timecheck_mod.check_trade("NIFTY", 25000, 25100, 25200, "short")
+        self.assertFalse(result["ok"])
+        self.assertIn("target", result["error"].lower())
+
+    def test_check_unknown_symbol(self):
+        result = timecheck_mod.check_trade("XYZABC", 25000, 24900, 25200, "long")
+        self.assertFalse(result["ok"])
+        self.assertIn("unknown symbol", result["error"])
+
+    def test_check_option_symbol_refused(self):
+        # An option symbol is not spot — the form is for index/stock levels only.
+        result = timecheck_mod.check_trade("NIFTY25800CE", 250, 200, 300, "long")
+        self.assertFalse(result["ok"])
+
+    def test_check_non_numeric(self):
+        result = timecheck_mod.check_trade("NIFTY", "abc", 24900, 25200, "long")
+        self.assertFalse(result["ok"])
+
+    def test_check_stock_uses_stock_bars(self):
+        # Locks the fix: MC for a stock must fetch the STOCK's bars, not NIFTY's.
+        from unittest.mock import patch
+        seen = {}
+
+        def _fake(symbol, interval="5m", days=60):
+            seen["symbol"] = symbol
+            return _synthetic_mc_frame()
+
+        with patch.object(data_mod, "fetch_intraday_bars", side_effect=_fake):
+            result = timecheck_mod.check_trade("RELIANCE", 1400, 1390, 1420, "long")
+        self.assertTrue(result["ok"])
+        self.assertEqual(seen["symbol"], "RELIANCE.NS")
+
+    def test_endpoint_missing_params(self):
+        from web import app as app_mod
+        result = app_mod._api_timemachine_check({})
+        self.assertFalse(result["ok"])
+        self.assertIn("error", result)
+        result = app_mod._api_timemachine_check({"symbol": ["NIFTY"]})
+        self.assertFalse(result["ok"])
+
+    def test_endpoint_valid_call_renders_html(self):
+        from web import app as app_mod
+        app_mod._cache.clear()
+        with self._mock_bars():
+            result = app_mod._api_timemachine_check({
+                "symbol": ["NIFTY"], "entry": ["25000"], "stop": ["24900"],
+                "target": ["25200"], "direction": ["long"]})
+        self.assertTrue(result["ok"])
+        for needle in ("Target first", "Stop first", "Neither",
+                       "Trade check", "opt-call", "10,000 replays"):
+            self.assertIn(needle, result["html"])
+
+    def test_endpoint_invalid_returns_clean_error(self):
+        from web import app as app_mod
+        app_mod._cache.clear()
+        result = app_mod._api_timemachine_check({
+            "symbol": ["NIFTY"], "entry": ["25000"], "stop": ["25100"],
+            "target": ["25200"], "direction": ["long"]})
+        self.assertFalse(result["ok"])
+        self.assertIn("error", result)
+        self.assertNotIn("html", result)
+
+    def test_page_has_form(self):
+        from web import app as app_mod
+        page = app_mod.timemachine_page("en")
+        for needle in ("tm-check-form", "tm-check-result",
+                       "Option ke liye premium series chahiye",
+                       "<select name='symbol'>",
+                       "<option value='NIFTY' selected>NIFTY</option>",
+                       "<option value='long'>CALL</option>",
+                       "<option value='short'>PUT</option>",
+                       "Check karo — 10,000 replays"):
+            self.assertIn(needle, page)
+
+
 class TestDashboardNews(unittest.TestCase):
     """Home page shows headlines AUTOMATICALLY (real-time) — no manual check."""
 
