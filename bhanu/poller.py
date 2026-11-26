@@ -1,0 +1,712 @@
+"""Background live-data engine for the Bhanu Indian Day Trader dashboard.
+
+The dashboard never fetches market data while rendering a page. Instead,
+daemon threads keep an in-memory state warm at all times, and every page
+and ``/api/*`` endpoint reads from that state (falling back to the
+on-demand fetchers only when the engine has nothing yet):
+
+    * indices — every NSE index (allIndices) every 15 s while the
+      market is open (5 min when closed): last, % change, prev close,
+      open, PE, advances/declines.
+    * spark — Yahoo's batch feed, 20 symbols per call: the 3 indices
+      every 5 s (the live quote feed — a new price every few seconds),
+      all 39 symbols every 60 s (flow/sector input).
+    * intraday — 5-minute candles + close line for the 3 indices every
+      60 s, so the home charts draw instantly from warm data.
+    * flow / sectors — all 39 symbols' intraday % change every 5 min.
+    * news — automatic backend news check (NSE announcements + Yahoo
+      headlines) for the 3 indices every 5 min.
+    * scans — ORB scan every 2 min, levels every 2 min, Time Machine
+      (10,000 Monte Carlo replays) every 10 min.
+    * snapshot — today's intraday state is written to disk every
+      5 minutes while open, and reloaded on start, so a restart still
+      shows the day's real data instead of nothing.
+
+Rules:
+    * Last good value wins — a failed fetch never clears the state.
+    * HTTP 429 triggers a global 120 s backoff for the fast feeds.
+    * Stdlib only (urllib + threading); no new dependency.
+    * Threads are daemons and never block a page: the engine is
+      started once from ``web.app.main()``.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from bhanu import charts as charts_mod
+from bhanu import data as data_mod
+
+IST = ZoneInfo("Asia/Kolkata")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SNAPSHOT_PATH = REPO_ROOT / "data" / "poller_snapshot.json"
+
+# --- Cadence (seconds): fast while the market is open, slow otherwise. ---
+POLL_INDICES_FAST_S = 15
+POLL_INDICES_SLOW_S = 300
+POLL_SPARK_FAST_S = 5
+POLL_SPARK_SLOW_S = 300
+#: Full-universe spark (all 39 symbols) — flow/sector input.
+POLL_SPARK_FULL_FAST_S = 60
+POLL_SPARK_FULL_SLOW_S = 300
+POLL_INTRADAY_FAST_S = 60
+POLL_INTRADAY_SLOW_S = 300
+POLL_FLOW_FAST_S = 300
+POLL_FLOW_SLOW_S = 600
+POLL_NEWS_FAST_S = 300
+POLL_NEWS_SLOW_S = 900
+POLL_SCAN_FAST_S = 120
+POLL_SCAN_SLOW_S = 600
+POLL_TM_FAST_S = 600
+POLL_TM_SLOW_S = 1800
+POLL_SNAPSHOT_FAST_S = 300
+POLL_SNAPSHOT_SLOW_S = 3600
+
+#: Global backoff after an HTTP 429 (seconds).
+BACKOFF_429_S = 120
+#: A spark last-price counts as fresh for this long (seconds).
+SPARK_FRESH_S = 120
+
+NSE_ALL_INDICES_URL = "https://www.nseindia.com/api/allIndices"
+SPARK_URL = (
+    "https://query1.finance.yahoo.com/v7/finance/spark"
+    "?symbols={symbols}&range=1d&interval=1m"
+)
+SPARK_URL_FALLBACK = SPARK_URL.replace(
+    "query1.finance.yahoo.com", "query2.finance.yahoo.com", 1)
+USER_AGENT = {"User-Agent": "Mozilla/5.0"}
+FETCH_TIMEOUT_S = 15
+
+#: NSE index name -> our display name.
+INDEX_NAMES: dict[str, str] = {
+    "NIFTY 50": "NIFTY",
+    "NIFTY BANK": "BANKNIFTY",
+    "SENSEX": "SENSEX",
+}
+INDEX_YAHOO: dict[str, str] = {
+    "NIFTY": "^NSEI",
+    "BANKNIFTY": "^NSEBANK",
+    "SENSEX": "^BSESN",
+}
+INDEX_LABELS: dict[str, str] = {
+    "NIFTY": "NIFTY 50",
+    "BANKNIFTY": "BANK NIFTY",
+    "SENSEX": "SENSEX",
+}
+NEWS_SYMBOLS: tuple[str, ...] = ("NIFTY", "BANKNIFTY", "SENSEX")
+
+
+class PollerError(Exception):
+    """A fetch failed; ``status`` is the HTTP status when known."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+# ---------------------------------------------------------------------------
+# State (guarded by _LOCK; readers copy what they need)
+# ---------------------------------------------------------------------------
+
+def _fresh_state() -> dict:
+    return {
+        "running": False,
+        "started_at": "",
+        "indices": {},
+        "spark": {},
+        "intraday": {},
+        "flow": None,
+        "sectors": None,
+        "news": {},
+        "orb": None,
+        "levels": None,
+        "timemachine": None,
+        "ticks": {},
+        "symbols_scanned": 0,
+        "orb_hits": 0,
+        "timemachine_replays": 0,
+        "news_checked_at": "",
+        "snapshot_at": "",
+        "errors": 0,
+        "slow_until": 0.0,
+    }
+
+
+STATE: dict = _fresh_state()
+_LOCK = threading.Lock()
+_STOP = threading.Event()
+_started = False
+_threads: list[threading.Thread] = []
+
+
+# ---------------------------------------------------------------------------
+# Clock helpers
+# ---------------------------------------------------------------------------
+
+def _now_ist() -> datetime:
+    return datetime.now(IST)
+
+
+def _now_iso() -> str:
+    return _now_ist().strftime("%Y-%m-%d %H:%M:%S IST")
+
+
+def is_open(now: datetime | None = None) -> bool:
+    """True during the NSE session (weekday, 09:15–15:30 IST)."""
+    t = now or _now_ist()
+    if t.weekday() >= 5:
+        return False
+    minutes = t.hour * 60 + t.minute
+    return 555 <= minutes < 930
+
+
+def _interval(fast_s: float, slow_s: float) -> float:
+    return fast_s if is_open() else slow_s
+
+
+# ---------------------------------------------------------------------------
+# Fetchers (plain urllib, browser user-agent — no session needed)
+# ---------------------------------------------------------------------------
+
+def _fetch_json(url: str, timeout: float = FETCH_TIMEOUT_S) -> dict:
+    """GET a JSON URL: first host, then the fallback host on 429/5xx."""
+    last_error: Exception | None = None
+    for host_url in (url, url.replace(
+            "query1.finance.yahoo.com", "query2.finance.yahoo.com", 1)):
+        try:
+            req = urllib.request.Request(host_url, headers=USER_AGENT)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            last_error = PollerError(f"HTTP {exc.code} for {host_url}",
+                                     status=exc.code)
+            if exc.code == 429 or 500 <= exc.code < 600:
+                continue
+            raise last_error from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = PollerError(f"network error for {host_url}: {exc}")
+            continue
+    raise PollerError(f"could not fetch {url}: {last_error}")
+
+
+def _f(value) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_all_indices(payload: dict) -> dict[str, dict]:
+    """NSE allIndices payload -> {display name: index fields}."""
+    out: dict[str, dict] = {}
+    for row in (payload or {}).get("data", []) or []:
+        name = INDEX_NAMES.get(str(row.get("index", "")))
+        if not name:
+            continue
+        last = _f(row.get("last"))
+        week_ago = _f(row.get("oneWeekAgoVal"))
+        out[name] = {
+            "name": name,
+            "last": last,
+            "pct": _f(row.get("percentChange")),
+            "chg": _f(row.get("variation")),
+            "prev": _f(row.get("previousClose")),
+            "open": _f(row.get("open")),
+            "pe": _f(row.get("pe")),
+            "adv": row.get("advances"),
+            "dec": row.get("declines"),
+            "high52": _f(row.get("yearHigh")),
+            "low52": _f(row.get("yearLow")),
+            "w1": round((last / week_ago - 1) * 100, 2)
+            if last and week_ago else None,
+            "m1": _f(row.get("perChange30d")),
+            "y1": _f(row.get("perChange365d")),
+        }
+    return out
+
+
+def fetch_nse_indices() -> dict[str, dict]:
+    """All NSE indices, parsed to our display names."""
+    return parse_all_indices(_fetch_json(NSE_ALL_INDICES_URL))
+
+
+def parse_spark(payload: dict) -> dict[str, dict]:
+    """Yahoo spark payload -> {yahoo symbol: ltp/prev/time/closes}.
+
+    ``closes`` is a list of ``{"t": unix seconds, "c": close}`` for the
+    1-minute closes of today, with missing closes dropped.
+    """
+    out: dict[str, dict] = {}
+    for res in ((payload or {}).get("spark", {}) or {}).get("result", []) or []:
+        symbol = res.get("symbol")
+        response = (res.get("response") or [None])[0]
+        if not symbol or not response or not response.get("timestamp"):
+            continue
+        meta = response.get("meta", {}) or {}
+        quote = ((response.get("indicators", {}) or {}).get("quote")
+                 or [{}])[0]
+        closes_raw = quote.get("close") or []
+        stamps = response["timestamp"]
+        closes = [
+            {"t": int(ts), "c": round(float(c), 2)}
+            for ts, c in zip(stamps, closes_raw)
+            if c is not None
+        ]
+        if not closes:
+            continue
+        out[symbol] = {
+            "ltp": _f(meta.get("regularMarketPrice")),
+            "prev": _f(meta.get("chartPreviousClose")),
+            "time": meta.get("regularMarketTime") or 0,
+            "closes": closes,
+        }
+    return out
+
+
+def fetch_spark(symbols: list[str]) -> dict[str, dict]:
+    """Batched Yahoo spark fetch, 20 symbols per call.
+
+    Raises :class:`PollerError` (with ``status``) on failure; a 429
+    must be treated as a global backoff by the caller.
+    """
+    out: dict[str, dict] = {}
+    for i in range(0, len(symbols), 20):
+        batch = symbols[i:i + 20]
+        query = ",".join(
+            urllib.parse.quote(s) for s in batch)
+        url = SPARK_URL.format(symbols=query)
+        try:
+            payload = _fetch_json(url)
+        except PollerError:
+            # _fetch_json already tried the fallback host; surface it.
+            raise
+        out.update(parse_spark(payload))
+        time.sleep(0.08)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Tick jobs (each keeps the last good value on failure)
+# ---------------------------------------------------------------------------
+
+def _bump_errors() -> None:
+    with _LOCK:
+        STATE["errors"] += 1
+
+
+def _mark_tick(name: str) -> None:
+    with _LOCK:
+        STATE["ticks"][name] = _now_iso()
+
+
+def _tick_indices() -> None:
+    try:
+        indices = fetch_nse_indices()
+    except Exception:  # noqa: BLE001 - keep last good value
+        _bump_errors()
+        return
+    if indices:
+        with _LOCK:
+            STATE["indices"] = indices
+        _mark_tick("indices")
+
+
+def _do_spark(symbols: list[str]) -> bool:
+    """One batched spark fetch into STATE. Returns False on failure —
+    a 429 also sets the global backoff, and the last good value stays."""
+    if time.time() < STATE["slow_until"]:
+        return False
+    try:
+        spark = fetch_spark(symbols)
+    except PollerError as exc:
+        if exc.status == 429:
+            with _LOCK:
+                STATE["slow_until"] = time.time() + BACKOFF_429_S
+        _bump_errors()
+        return False
+    except Exception:  # noqa: BLE001 - keep last good value
+        _bump_errors()
+        return False
+    if spark:
+        with _LOCK:
+            STATE["spark"].update(spark)
+        return True
+    return False
+
+
+def _tick_spark_fast() -> None:
+    """Live quote feed: the 3 indices every few seconds."""
+    if _do_spark([INDEX_YAHOO[name]
+                  for name in ("NIFTY", "BANKNIFTY", "SENSEX")]):
+        _mark_tick("spark_fast")
+
+
+def _tick_spark_full() -> None:
+    """Full universe spark every 60 s (flow/sector input)."""
+    if _do_spark(list(dict.fromkeys(data_mod.UNIVERSE.values()))):
+        _mark_tick("spark_full")
+
+
+def _tick_intraday() -> None:
+    ok = False
+    for symbol in ("^NSEI", "^NSEBANK", "^BSESN"):
+        try:
+            payload = charts_mod.intraday_series(symbol)
+        except Exception:  # noqa: BLE001 - keep last good value
+            _bump_errors()
+            continue
+        if payload.get("error"):
+            _bump_errors()
+            continue
+        with _LOCK:
+            STATE["intraday"][symbol] = payload
+        ok = True
+    if ok:
+        _mark_tick("intraday")
+
+
+def _tick_flow() -> None:
+    try:
+        flow = charts_mod.flow_series()
+        sectors = charts_mod.sector_map(flow)
+    except Exception:  # noqa: BLE001 - keep last good value
+        _bump_errors()
+        return
+    with _LOCK:
+        STATE["flow"] = flow
+        STATE["sectors"] = sectors
+        STATE["symbols_scanned"] = len(flow.get("series", [])) + len(
+            flow.get("failed", []))
+    _mark_tick("flow")
+
+
+def _tick_news() -> None:
+    from bhanu import news as news_mod
+
+    ok = False
+    for symbol in NEWS_SYMBOLS:
+        try:
+            result = news_mod.check_symbol(symbol)
+        except Exception:  # noqa: BLE001 - keep last good value
+            _bump_errors()
+            continue
+        with _LOCK:
+            STATE["news"][symbol] = result
+        ok = True
+    if ok:
+        with _LOCK:
+            STATE["news_checked_at"] = _now_iso()
+        _mark_tick("news")
+
+
+def _tick_scans() -> None:
+    from bhanu import levels as levels_mod
+    from bhanu import scanner as scanner_mod
+
+    try:
+        orb = scanner_mod.scan_orb()
+        scanner_mod.write_watchlist(orb)
+    except Exception:  # noqa: BLE001 - keep last good value
+        _bump_errors()
+    else:
+        with _LOCK:
+            STATE["orb"] = orb
+            STATE["orb_hits"] = len(orb.get("hits", []))
+    try:
+        levels = levels_mod.scan_levels()
+    except Exception:  # noqa: BLE001 - keep last good value
+        _bump_errors()
+    else:
+        with _LOCK:
+            STATE["levels"] = levels
+    _mark_tick("scans")
+
+
+def _tick_timemachine() -> None:
+    from bhanu import timecheck as timecheck_mod
+
+    try:
+        result = timecheck_mod.collect_timemachine()
+    except Exception:  # noqa: BLE001 - keep last good value
+        _bump_errors()
+        return
+    with _LOCK:
+        STATE["timemachine"] = result
+        mc = (result or {}).get("monte_carlo", {}) or {}
+        STATE["timemachine_replays"] = int(mc.get("n", 0) or 0)
+    _mark_tick("timemachine")
+
+
+def _snapshot_payload() -> dict:
+    with _LOCK:
+        spark = {
+            sym: {"ltp": val.get("ltp"), "prev": val.get("prev")}
+            for sym, val in STATE["spark"].items()
+        }
+        return {
+            "date": _now_ist().date().isoformat(),
+            "as_of": _now_iso(),
+            "indices": dict(STATE["indices"]),
+            "spark": spark,
+            "intraday": dict(STATE["intraday"]),
+        }
+
+
+def _tick_snapshot() -> None:
+    if not is_open():
+        return
+    try:
+        payload = _snapshot_payload()
+        SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SNAPSHOT_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(SNAPSHOT_PATH)
+    except OSError:
+        _bump_errors()
+        return
+    with _LOCK:
+        STATE["snapshot_at"] = _now_iso()
+    _mark_tick("snapshot")
+
+
+def _load_snapshot() -> bool:
+    """Reload today's snapshot (if any) so a restart still shows the
+    day's real data. Returns True when a same-day snapshot was loaded."""
+    try:
+        payload = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if payload.get("date") != _now_ist().date().isoformat():
+        return False
+    with _LOCK:
+        if payload.get("indices"):
+            STATE["indices"] = payload["indices"]
+        if payload.get("spark"):
+            STATE["spark"] = {
+                sym: {"ltp": v.get("ltp"), "prev": v.get("prev"),
+                      "time": 0, "closes": []}
+                for sym, v in payload["spark"].items()
+            }
+        if payload.get("intraday"):
+            STATE["intraday"] = payload["intraday"]
+        STATE["snapshot_at"] = payload.get("as_of", "")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Engine control
+# ---------------------------------------------------------------------------
+
+_JOBS: tuple[tuple[str, float, float, object], ...] = (
+    ("indices", POLL_INDICES_FAST_S, POLL_INDICES_SLOW_S, _tick_indices),
+    ("spark_fast", POLL_SPARK_FAST_S, POLL_SPARK_SLOW_S, _tick_spark_fast),
+    ("spark_full", POLL_SPARK_FULL_FAST_S, POLL_SPARK_FULL_SLOW_S,
+     _tick_spark_full),
+    ("intraday", POLL_INTRADAY_FAST_S, POLL_INTRADAY_SLOW_S, _tick_intraday),
+    ("flow", POLL_FLOW_FAST_S, POLL_FLOW_SLOW_S, _tick_flow),
+    ("news", POLL_NEWS_FAST_S, POLL_NEWS_SLOW_S, _tick_news),
+    ("scans", POLL_SCAN_FAST_S, POLL_SCAN_SLOW_S, _tick_scans),
+    ("timemachine", POLL_TM_FAST_S, POLL_TM_SLOW_S, _tick_timemachine),
+    ("snapshot", POLL_SNAPSHOT_FAST_S, POLL_SNAPSHOT_SLOW_S, _tick_snapshot),
+)
+
+
+def _loop(name: str, fast_s: float, slow_s: float, fn) -> None:
+    while not _STOP.is_set():
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 - a job must never kill its thread
+            _bump_errors()
+        _STOP.wait(_interval(fast_s, slow_s))
+
+
+def start() -> bool:
+    """Start the engine (idempotent). Returns True when running."""
+    global _started
+    with _LOCK:
+        if _started:
+            return True
+        _started = True
+    _STOP.clear()
+    _load_snapshot()
+    with _LOCK:
+        STATE["running"] = True
+        STATE["started_at"] = _now_iso()
+    for name, fast_s, slow_s, fn in _JOBS:
+        thread = threading.Thread(
+            target=_loop, args=(name, fast_s, slow_s, fn),
+            daemon=True, name=f"poller-{name}")
+        thread.start()
+        _threads.append(thread)
+    return True
+
+
+def stop() -> None:
+    """Stop the engine (tests / shutdown)."""
+    global _started
+    _STOP.set()
+    with _LOCK:
+        _started = False
+        STATE["running"] = False
+    for thread in list(_threads):
+        thread.join(timeout=2)
+    _threads.clear()
+
+
+def is_running() -> bool:
+    return bool(STATE.get("running"))
+
+
+# ---------------------------------------------------------------------------
+# Readers — what the dashboard serves (copies, never the live dicts)
+# ---------------------------------------------------------------------------
+
+def get_quotes() -> list[dict] | None:
+    """Live index quotes: NSE first, fresh Yahoo spark overrides the
+    last price. Returns None when the engine has nothing yet."""
+    with _LOCK:
+        indices = dict(STATE["indices"])
+        spark = dict(STATE["spark"])
+    if not indices and not spark:
+        return None
+    out: list[dict] = []
+    now = time.time()
+    for name in ("NIFTY", "BANKNIFTY", "SENSEX"):
+        yahoo = INDEX_YAHOO[name]
+        ix = indices.get(name, {})
+        price = ix.get("last")
+        prev = ix.get("prev")
+        pct = ix.get("pct")
+        sp = spark.get(yahoo, {})
+        ltp = sp.get("ltp")
+        sprev = sp.get("prev")
+        if (ltp is not None and sprev
+                and (now - (sp.get("time") or 0)) < SPARK_FRESH_S):
+            price, prev = ltp, sprev
+            pct = round((ltp / sprev - 1) * 100, 2)
+        elif price is None and ltp is not None:
+            # No NSE quote at all (SENSEX is a BSE index, so NSE never
+            # lists it) and Yahoo's BSE feed runs ~15 min stale: the
+            # last good spark value still beats an empty card.
+            price, prev = ltp, sprev
+            pct = round((ltp / sprev - 1) * 100, 2) if sprev else None
+        if price is None:
+            out.append({"symbol": yahoo, "label": INDEX_LABELS[name],
+                        "price": None, "prev_close": prev,
+                        "change_pct": pct, "error": "no live quote yet"})
+        else:
+            out.append({"symbol": yahoo, "label": INDEX_LABELS[name],
+                        "price": float(price),
+                        "prev_close": float(prev) if prev is not None else None,
+                        "change_pct": pct, "error": None})
+    return out
+
+
+def get_spark(yahoo_symbol: str) -> dict | None:
+    """Warmed spark entry for one symbol (ltp/prev/time/1m closes),
+    or None when the engine has not had a spark tick yet."""
+    with _LOCK:
+        entry = STATE["spark"].get(yahoo_symbol)
+    return dict(entry) if entry else None
+
+
+def get_intraday(yahoo_symbol: str) -> dict | None:
+    """Warmed intraday payload for one index (or None when not yet)."""
+    with _LOCK:
+        payload = STATE["intraday"].get(yahoo_symbol)
+    return dict(payload) if payload else None
+
+
+def get_flow() -> dict | None:
+    """Warmed Smart Money Flow payload (or None when not yet)."""
+    with _LOCK:
+        flow = STATE["flow"]
+    return dict(flow) if flow else None
+
+
+def get_sectors() -> dict | None:
+    """Warmed sector map payload (or None when not yet)."""
+    with _LOCK:
+        sectors = STATE["sectors"]
+    return dict(sectors) if sectors else None
+
+
+def get_news(symbol: str) -> dict | None:
+    """Warmed news check for one index (or None when not yet)."""
+    with _LOCK:
+        result = STATE["news"].get(symbol)
+    return dict(result) if result else None
+
+
+def get_orb() -> dict | None:
+    """Warmed ORB scan result (or None when not yet)."""
+    with _LOCK:
+        orb = STATE["orb"]
+    return dict(orb) if orb else None
+
+
+def get_levels() -> dict | None:
+    """Warmed levels scan result (or None when not yet)."""
+    with _LOCK:
+        levels = STATE["levels"]
+    return dict(levels) if levels else None
+
+
+def get_timemachine() -> dict | None:
+    """Warmed Time Machine result (or None when not yet)."""
+    with _LOCK:
+        result = STATE["timemachine"]
+    return dict(result) if result else None
+
+
+def status() -> dict:
+    """Engine status for the robot card and /api/poller (in-memory,
+    instant — this never fetches)."""
+    with _LOCK:
+        ticks = dict(STATE["ticks"])
+        snapshot = {
+            "running": bool(STATE["running"]),
+            "started_at": STATE["started_at"],
+            "market_open": is_open(),
+            "ticks": ticks,
+            "symbols_scanned": STATE["symbols_scanned"],
+            "spark_symbols": len(STATE["spark"]),
+            "orb_hits": STATE["orb_hits"],
+            "news_checked_at": STATE["news_checked_at"],
+            "timemachine_replays": STATE["timemachine_replays"],
+            "snapshot_at": STATE["snapshot_at"],
+            "errors": STATE["errors"],
+            "backoff_until": (
+                datetime.fromtimestamp(STATE["slow_until"], tz=IST)
+                .strftime("%Y-%m-%d %H:%M:%S IST")
+                if STATE["slow_until"] > time.time() else ""
+            ),
+        }
+    fresh = False
+    try:
+        for stamp in ticks.values():
+            when = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S IST")
+            when = when.replace(tzinfo=IST)
+            if (_now_ist() - when).total_seconds() < 120:
+                fresh = True
+                break
+    except (ValueError, TypeError):
+        fresh = False
+    snapshot["fresh"] = fresh
+    return snapshot
+
+
+if __name__ == "__main__":
+    print("live engine: indices every "
+          f"{POLL_INDICES_FAST_S}s open / {POLL_INDICES_SLOW_S}s closed, "
+          f"spark batched 20/call, snapshot every {POLL_SNAPSHOT_FAST_S}s")
+    print(f"universe: {len(data_mod.UNIVERSE)} symbols "
+          f"({len(data_mod.INDICES)} indices)")

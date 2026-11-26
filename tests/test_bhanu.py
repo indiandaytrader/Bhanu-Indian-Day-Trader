@@ -21,6 +21,7 @@ from bhanu import i18n as i18n_mod
 from bhanu import levels as levels_mod
 from bhanu import news as news_mod
 from bhanu import paper as paper_mod
+from bhanu import poller as poller_mod
 from bhanu import risk as risk_mod
 from bhanu import scanner as scanner_mod
 from bhanu import signal as signal_mod
@@ -1768,6 +1769,389 @@ class TestIntradayRobustness(unittest.TestCase):
         self.assertEqual(len(payload["candles"]), 6)
         self.assertTrue(payload["stale"])
         self.assertEqual(payload["as_of"], "2026-11-26 10:00:00")
+
+
+class TestPoller(unittest.TestCase):
+    """The background live engine: parsers, market-hours gating,
+    429 backoff, last-good-value, snapshot, and start/stop."""
+
+    def setUp(self):
+        import copy
+        self._saved_state = copy.deepcopy(poller_mod.STATE)
+        self._saved_started = poller_mod._started
+
+    def tearDown(self):
+        import copy
+        try:
+            poller_mod.stop()
+        except Exception:  # noqa: BLE001 - teardown must not fail
+            pass
+        poller_mod.STATE.clear()
+        poller_mod.STATE.update(copy.deepcopy(self._saved_state))
+        poller_mod._started = self._saved_started
+
+    def test_not_running_after_import(self):
+        self.assertFalse(poller_mod.is_running())
+        self.assertFalse(poller_mod.status()["running"])
+
+    def test_is_open(self):
+        # Thu 26 Nov 2026, 10:00 IST — open; Sat 28 Nov — closed.
+        self.assertTrue(poller_mod.is_open(
+            datetime(2026, 11, 26, 10, 0, tzinfo=IST)))
+        self.assertTrue(poller_mod.is_open(
+            datetime(2026, 11, 26, 9, 15, tzinfo=IST)))
+        self.assertFalse(poller_mod.is_open(
+            datetime(2026, 11, 26, 9, 0, tzinfo=IST)))
+        self.assertFalse(poller_mod.is_open(
+            datetime(2026, 11, 26, 15, 30, tzinfo=IST)))
+        self.assertFalse(poller_mod.is_open(
+            datetime(2026, 11, 28, 10, 0, tzinfo=IST)))
+
+    def _indices_payload(self):
+        return {"data": [
+            {"index": "NIFTY 50", "last": 25791.95, "percentChange": 0.42,
+             "variation": 108.1, "previousClose": 25683.85, "open": 25700.0,
+             "pe": 22.5, "advances": 32, "declines": 18,
+             "yearHigh": 26000.0, "yearLow": 22000.0,
+             "oneWeekAgoVal": 25500.0, "perChange30d": 1.2,
+             "perChange365d": 5.6},
+            {"index": "NIFTY BANK", "last": 63404.95, "percentChange": -0.1,
+             "variation": -63.0, "previousClose": 63468.0, "open": 63500.0,
+             "pe": None, "advances": 5, "declines": 7,
+             "yearHigh": 65000.0, "yearLow": 50000.0,
+             "oneWeekAgoVal": 63000.0, "perChange30d": 0.5,
+             "perChange365d": 8.0},
+            {"index": "SENSEX", "last": 83929.48, "percentChange": 0.3,
+             "variation": 250.0, "previousClose": 83679.0, "open": 83800.0,
+             "pe": 23.0, "advances": 20, "declines": 10,
+             "yearHigh": 85000.0, "yearLow": 70000.0,
+             "oneWeekAgoVal": 83000.0, "perChange30d": 1.0,
+             "perChange365d": 6.0},
+            {"index": "NIFTY MIDCAP 100", "last": 50000.0,
+             "percentChange": 0.1, "variation": 50.0,
+             "previousClose": 49950.0},
+        ]}
+
+    def test_parse_all_indices(self):
+        out = poller_mod.parse_all_indices(self._indices_payload())
+        self.assertEqual(set(out), {"NIFTY", "BANKNIFTY", "SENSEX"})
+        self.assertEqual(out["NIFTY"]["last"], 25791.95)
+        self.assertEqual(out["NIFTY"]["prev"], 25683.85)
+        self.assertAlmostEqual(out["NIFTY"]["w1"], 1.14, places=2)
+        self.assertIsNone(out["BANKNIFTY"]["pe"])
+        self.assertEqual(out["SENSEX"]["adv"], 20)
+
+    def _spark_payload(self):
+        return {"spark": {"result": [
+            {"symbol": "^NSEI", "response": [{
+                "timestamp": [1700000000, 1700000060],
+                "indicators": {"quote": [{"close": [25790.0, None]}]},
+                "meta": {"regularMarketPrice": 25790.0,
+                         "chartPreviousClose": 25683.85,
+                         "regularMarketTime": 1700000060}}]},
+            {"symbol": "^NSEBANK", "response": [{
+                "timestamp": [],
+                "indicators": {"quote": [{"close": []}]},
+                "meta": {}}]},
+            {"symbol": "RELIANCE.NS", "response": []},
+        ]}}
+
+    def test_parse_spark(self):
+        out = poller_mod.parse_spark(self._spark_payload())
+        self.assertEqual(set(out), {"^NSEI"})
+        self.assertEqual(out["^NSEI"]["ltp"], 25790.0)
+        self.assertEqual(out["^NSEI"]["prev"], 25683.85)
+        # The None close is dropped — only one 1-minute point survives.
+        self.assertEqual(len(out["^NSEI"]["closes"]), 1)
+        self.assertEqual(out["^NSEI"]["closes"][0]["c"], 25790.0)
+
+    def test_spark_429_sets_global_backoff(self):
+        import time as _time
+        from unittest.mock import patch
+        with patch.object(poller_mod, "fetch_spark",
+                          side_effect=poller_mod.PollerError(
+                              "HTTP 429", status=429)):
+            poller_mod._tick_spark_fast()
+        self.assertGreater(poller_mod.STATE["slow_until"], _time.time())
+        self.assertGreaterEqual(poller_mod.STATE["errors"], 1)
+
+    def test_tick_spark_skipped_during_backoff(self):
+        import time as _time
+        from unittest.mock import Mock, patch
+        poller_mod.STATE["slow_until"] = _time.time() + 1000
+        spy = Mock(side_effect=AssertionError("must not fetch"))
+        with patch.object(poller_mod, "fetch_spark", spy):
+            poller_mod._tick_spark_fast()
+        spy.assert_not_called()
+
+    def test_spark_fast_fetches_only_indices(self):
+        from unittest.mock import patch
+        with patch.object(poller_mod, "fetch_spark",
+                          return_value={}) as spy:
+            poller_mod._tick_spark_fast()
+        spy.assert_called_once()
+        self.assertEqual(spy.call_args.args[0],
+                         ["^NSEI", "^NSEBANK", "^BSESN"])
+
+    def test_spark_full_fetches_whole_universe(self):
+        from unittest.mock import patch
+        from bhanu import data as _data
+        with patch.object(poller_mod, "fetch_spark",
+                          return_value={}) as spy:
+            poller_mod._tick_spark_full()
+        spy.assert_called_once()
+        self.assertEqual(set(spy.call_args.args[0]),
+                         set(_data.UNIVERSE.values()))
+
+    def test_live_cadence_is_seconds_not_minutes(self):
+        # The live quote feed must tick every few seconds, never on a
+        # 60-second cycle — that is the whole point of real-time.
+        self.assertEqual(poller_mod.POLL_SPARK_FAST_S, 5)
+        self.assertEqual(poller_mod.POLL_SPARK_FULL_FAST_S, 60)
+
+    def test_get_spark_reader(self):
+        poller_mod.STATE["spark"]["^NSEI"] = {
+            "ltp": 25790.0, "prev": 25683.85, "time": 1700000000,
+            "closes": [{"t": 1700000000, "c": 25790.0}]}
+        got = poller_mod.get_spark("^NSEI")
+        self.assertEqual(got["ltp"], 25790.0)
+        self.assertEqual(got["closes"][0]["c"], 25790.0)
+        self.assertIsNone(poller_mod.get_spark("^UNKNOWN"))
+
+    def test_get_quotes_uses_stale_spark_when_no_nse_quote(self):
+        # SENSEX is a BSE index: NSE never lists it, and Yahoo's BSE
+        # feed runs ~15 min stale — the card must still show the last
+        # good value instead of "no live quote yet".
+        import time as _time
+        poller_mod.STATE["indices"].clear()
+        poller_mod.STATE["spark"]["^BSESN"] = {
+            "ltp": 83960.42, "prev": 83000.0,
+            "time": _time.time() - 900, "closes": []}
+        out = poller_mod.get_quotes()
+        sensex = [q for q in out if q["symbol"] == "^BSESN"][0]
+        self.assertEqual(sensex["price"], 83960.42)
+        self.assertIsNone(sensex["error"])
+
+    def test_get_quotes_empty_when_no_state(self):
+        self.assertIsNone(poller_mod.get_quotes())
+
+    def test_get_quotes_prefers_fresh_spark(self):
+        import time as _time
+        poller_mod.STATE["indices"] = poller_mod.parse_all_indices(
+            self._indices_payload())
+        poller_mod.STATE["spark"] = {
+            "^NSEI": {"ltp": 25100.0, "prev": 24900.0,
+                      "time": int(_time.time()), "closes": []}}
+        quotes = poller_mod.get_quotes()
+        nifty = next(q for q in quotes if q["symbol"] == "^NSEI")
+        self.assertEqual(nifty["price"], 25100.0)
+        self.assertAlmostEqual(nifty["change_pct"], 0.8, places=2)
+        self.assertIsNone(nifty["error"])
+
+    def test_get_quotes_stale_spark_ignored(self):
+        import time as _time
+        poller_mod.STATE["indices"] = poller_mod.parse_all_indices(
+            self._indices_payload())
+        poller_mod.STATE["spark"] = {
+            "^NSEI": {"ltp": 25100.0, "prev": 24900.0,
+                      "time": int(_time.time()) - 600, "closes": []}}
+        quotes = poller_mod.get_quotes()
+        nifty = next(q for q in quotes if q["symbol"] == "^NSEI")
+        self.assertEqual(nifty["price"], 25791.95)
+
+    def test_snapshot_roundtrip(self):
+        import tempfile
+        from unittest.mock import patch
+        poller_mod.STATE["indices"] = poller_mod.parse_all_indices(
+            self._indices_payload())
+        poller_mod.STATE["intraday"] = {
+            "^NSEI": {"symbol": "^NSEI", "line": [{"time": 1, "value": 2.0}],
+                      "candles": [], "error": None, "stale": False,
+                      "as_of": ""}}
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(poller_mod, "SNAPSHOT_PATH",
+                              Path(tmp) / "poller_snapshot.json"), \
+                 patch.object(poller_mod, "is_open", return_value=True):
+                poller_mod._tick_snapshot()
+                poller_mod.STATE["indices"] = {}
+                poller_mod.STATE["intraday"] = {}
+                self.assertTrue(poller_mod._load_snapshot())
+        self.assertEqual(poller_mod.STATE["indices"]["NIFTY"]["last"],
+                         25791.95)
+        self.assertEqual(poller_mod.STATE["intraday"]["^NSEI"]["line"],
+                         [{"time": 1, "value": 2.0}])
+
+    def test_start_stop_idempotent(self):
+        from unittest.mock import patch
+        noop = (("noop", 3600, 3600, lambda: None),)
+        with patch.object(poller_mod, "_JOBS", noop):
+            self.assertTrue(poller_mod.start())
+            first = len(poller_mod._threads)
+            self.assertEqual(first, 1)
+            self.assertTrue(poller_mod.start())
+            self.assertEqual(len(poller_mod._threads), 1)
+            self.assertTrue(poller_mod.is_running())
+            poller_mod.stop()
+            self.assertFalse(poller_mod.is_running())
+
+    def test_status_shape(self):
+        st = poller_mod.status()
+        for key in ("running", "started_at", "market_open", "ticks",
+                    "symbols_scanned", "spark_symbols", "orb_hits",
+                    "news_checked_at", "timemachine_replays", "snapshot_at",
+                    "errors", "backoff_until", "fresh"):
+            self.assertIn(key, st)
+
+    def test_breakdown_shows_robot_freshness_when_running(self):
+        from web import app as app_mod
+        sig = {"decision": "ENTER", "symbol": "NIFTY", "direction": "long",
+               "entry": 25730.0, "stop": 25650.0, "tp1": 25810.0,
+               "tp2": 25890.0, "tp3": 25970.0, "summary": "ok",
+               "factors": {}}
+        html = app_mod._signal_breakdown_html(sig)
+        self.assertNotIn("Robot", html)
+        poller_mod.STATE["running"] = True
+        poller_mod.STATE["ticks"] = {
+            "intraday": "2026-11-26 14:30:00 IST"}
+        poller_mod.STATE["news_checked_at"] = "2026-11-26 14:29:00 IST"
+        poller_mod.STATE["symbols_scanned"] = 39
+        html = app_mod._signal_breakdown_html(sig)
+        self.assertIn("Robot", html)
+        self.assertIn("14:30:00", html)
+
+
+class TestRebrand(unittest.TestCase):
+    """The product is only ever 'Bhanu Indian Day Trader': no other
+    dashboard name anywhere in the repo (code, docs, UI), and the home
+    page carries the robot + mini sections with no page-load fetch."""
+
+    def test_no_other_dashboard_name_in_repo(self):
+        root = Path(__file__).resolve().parent.parent
+        skip_dirs = {".venv", "__pycache__", "data", ".git"}
+        forbidden = ("Market Lab", "market-lab", "market_lab", "MarketLab")
+        hits = []
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            if any(part in skip_dirs for part in path.parts):
+                continue
+            if path.name == "test_bhanu.py":
+                continue  # the lock test itself names the forbidden string
+            if path.suffix.lower() not in (
+                    ".py", ".md", ".txt", ".html", ".js", ".bat", ".sh",
+                    ".yml", ".yaml", ".json"):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            for needle in forbidden:
+                if needle in text:
+                    hits.append(f"{path.relative_to(root)}: {needle!r}")
+        self.assertEqual(hits, [])
+
+    def test_product_name_everywhere(self):
+        root = Path(__file__).resolve().parent.parent
+        self.assertIn("Bhanu Indian Day Trader",
+                      (root / "README.md").read_text(encoding="utf-8"))
+        self.assertIn("Bhanu Indian Day Trader",
+                      (root / "web" / "app.py").read_text(encoding="utf-8"))
+
+    def test_home_has_robot_and_mini_sections(self):
+        from web import app as app_mod
+        html = app_mod.home("en")
+        for needle in ("id='robot-status'", "id='levels-mini'",
+                       "id='tm-mini'", "bhanuRobotFetch",
+                       "bhanuLevelsMiniFetch", "bhanuTmMiniFetch"):
+            self.assertIn(needle, html)
+        # No page-load fetch: the page HTML must not embed upstream URLs.
+        self.assertNotIn("finance.yahoo.com", html)
+        self.assertNotIn("nseindia.com", html)
+
+    def test_api_poller_shape(self):
+        from web import app as app_mod
+        out = app_mod._api_poller()
+        self.assertIn("running", out)
+        self.assertIn("ticks", out)
+        self.assertIn("fresh", out)
+
+    def test_api_robot_warming_up_when_engine_off(self):
+        from web import app as app_mod
+        out = app_mod._api_robot()
+        self.assertIn("Robot", out["html"])
+        self.assertIn("warming up", out["html"])
+
+    def test_levels_mini_stays_in_its_box(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        result = {"run_at_ist": "2026-11-26 13:00:00 IST", "levels": [
+            {"symbol": "NIFTY", "price": 25748.0,
+             "nearest_support": 25650.0, "nearest_resistance": 25800.0,
+             "signal": "short"}],
+            "failed": []}
+        app_mod._cache.pop("levels", None)
+        with patch.object(levels_mod, "scan_levels", return_value=result):
+            out = app_mod._api_levelsmini()
+        self.assertIn("table-wrap", out["html"])
+        self.assertIn("25,748.00", out["html"])
+
+
+class TestLiveRealtime(unittest.TestCase):
+    """Real-time, not refresh: quotes and index charts tick every 5 s
+    and update in place. The 60-second cycle is only for slow sections
+    (flow, sectors, news, ORB) whose data changes that slowly."""
+
+    def setUp(self):
+        poller_mod.STATE["spark"].clear()
+        poller_mod.STATE["slow_until"] = 0.0
+
+    def _seed_spark(self):
+        poller_mod.STATE["spark"]["^NSEI"] = {
+            "ltp": 25790.0, "prev": 25683.85, "time": 1700000060,
+            "closes": [{"t": 1700000000, "c": 25785.0},
+                       {"t": 1700000060, "c": 25790.0}]}
+
+    def test_api_live_returns_tick_when_warmed(self):
+        from web import app as app_mod
+        self._seed_spark()
+        out = app_mod._api_live({"symbol": ["^NSEI"]})
+        self.assertEqual(out["ltp"], 25790.0)
+        self.assertAlmostEqual(out["change_pct"], 0.41, places=1)
+        self.assertEqual(len(out["line"]), 2)
+        self.assertEqual(out["line"][-1]["value"], 25790.0)
+        self.assertIsNone(out["error"])
+
+    def test_api_live_honest_when_warming_up(self):
+        from web import app as app_mod
+        out = app_mod._api_live({"symbol": ["^NSEI"]})
+        self.assertIsNone(out["ltp"])
+        self.assertIn("warming up", out["error"])
+
+    def test_api_live_rejects_unknown_symbol(self):
+        from web import app as app_mod
+        out = app_mod._api_live({"symbol": ["^FOO"]})
+        self.assertIsNone(out["ltp"])
+        self.assertIn("unknown symbol", out["error"])
+
+    def test_line_charts_tick_live_not_on_60s_cycle(self):
+        from web import app as app_mod
+        js = app_mod._chart_js()
+        # 5-second live tick machinery exists…
+        self.assertIn("bhanuLiveLineTick", js)
+        self.assertIn("bhanuStartLiveLine", js)
+        self.assertIn("setInterval(run,5000)", js)
+        self.assertIn("/api/live?symbol=", js)
+        # …and the old 60-second full re-fetch of the line is gone.
+        self.assertNotIn("fetchLine", js)
+        # Quotes tick every 5 s too.
+        self.assertIn("setInterval(function(){\n      bhanuQuoteFetch()",
+                      js)
+
+    def test_live_indicator_promises_seconds(self):
+        from web import app as app_mod
+        html = app_mod.home("en")
+        self.assertIn("tick every few seconds", html)
+        self.assertNotIn("Charts refresh every 60 seconds", html)
 
 
 if __name__ == "__main__":

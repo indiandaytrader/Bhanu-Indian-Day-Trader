@@ -2,7 +2,10 @@
 
 Stdlib-only HTTP server (no framework). Pages:
   /         home — index quotes + intraday charts, Smart Money Flow,
-            sector map, news feed, ORB hits (charts on top, tables below)
+            sector map, news feed, ORB hits, robot status, levels and
+            Time Machine summaries (charts on top, tables below)
+  /api/poller, /api/robot  live-engine status + robot card (in-memory,
+            instant — these never fetch)
   /orb      ORB scanner + candlestick chart with overlays (VWAP, OB/FVG,
             structure, entry/SL/TP boxes, PDH/PDL)
   /levels   live support/resistance + candlestick chart with overlays
@@ -23,20 +26,29 @@ Stdlib-only HTTP server (no framework). Pages:
             (no CDN dependency — charts render even when the CDN is
             slow or blocked)
 
-Pages render INSTANTLY from local data only: every network fetch
-(quotes, charts, scans, news, Time Machine) happens lazily from
-/api/* after the page, with a "loading" state until the data arrives.
-Quotes/charts are cached 60s, flow/sector 5 min, the Time Machine
-10 min — repeat loads show instantly. When a source is unavailable
-the page says so plainly — no fake data is ever shown.
+Pages render INSTANTLY from local data only: a background live engine
+(``bhanu.poller``) keeps quotes, intraday bars, flow, sectors, news,
+scans and the Time Machine warm in memory, so every network fetch
+happens in the background, never on a page load. Each section loads
+lazily from /api/* after the page, with a "loading" state until the
+data arrives. When the engine has nothing yet, the page falls back to
+the on-demand fetchers (same caches as before: quotes/charts 60s,
+flow/sector 5 min, the Time Machine 10 min) — a slow source delays
+one card, never the page. When a source is unavailable the page says
+so plainly — no fake data is ever shown.
 
 Charts render with TradingView Lightweight Charts, bundled locally
 (web/static/lightweight-charts.js); when the library cannot load, a
 built-in SVG line/candlestick chart is drawn instead — a chart box
 is never left blank.
-Chart pages auto-refresh every 60 seconds (LIVE indicator, last-update
-time) — charts update in place, no page reload, no flicker. A failed
-refresh keeps the old data and says "update failed, retrying…".
+REAL-TIME, not refresh: index quotes and the home line charts tick
+every 5 seconds — the background engine sparks the 3 indices every
+5 s and the browser updates each chart's last point in place
+(``/api/live``), so the line visibly moves while you watch. No page
+reload, no 60-second wait. The LIVE indicator updates on every
+successful tick. Slower sections (flow, sectors, news, ORB scans)
+sync in place on their own cadence (60 s / 2–5 min) because their
+data only changes that often — they never ask for a reload either.
 Paper trading only: nothing here places a real order.
 """
 
@@ -66,6 +78,7 @@ from bhanu import skills as skills_mod
 from bhanu import timecheck as timecheck_mod
 from bhanu import volume as volume_mod
 from bhanu import news as news_mod
+from bhanu import poller as poller_mod
 
 IST = ZoneInfo("Asia/Kolkata")
 ROOT = Path(__file__).resolve().parent.parent
@@ -121,7 +134,7 @@ def _page(lang: str, title: str, body: str, head_extra: str = "", scripts: str =
     if live:
         live_html = (
             "<p class='muted' id='bhanu-live-indicator' "
-            "title='Charts refresh every 60 seconds — no page reload'>"
+            "title='Live — quotes and index charts tick every few seconds, no page reload'>"
             "● LIVE — last update --:--:--</p>"
         )
         scripts = scripts + _live_js()
@@ -224,10 +237,10 @@ def _chart_lib_tag() -> str:
 
 
 def _live_js() -> str:
-    """Auto-refresh engine for chart pages.
+    """Slow-sync engine for chart pages (flow, sectors, news, ORB).
 
     Every LIVE_REFRESH_MS each registered refresher (a function returning
-    a Promise) re-fetches its chart data and updates the chart in place —
+    a Promise) re-fetches its section data and updates it in place —
     no page reload, no flicker. Ticks are skipped while the tab is hidden
     or a refresh is already in flight; returning to a visible tab
     refreshes immediately. A failed tick keeps the old data on screen and
@@ -304,6 +317,8 @@ def _chart_js() -> str:
     """
     return """<script>
 window.bhanuRefreshers = window.bhanuRefreshers || [];
+window.bhanuLines = window.bhanuLines || {};
+window.bhanuLiveTimers = window.bhanuLiveTimers || {};
 window.bhanuCandles = window.bhanuCandles || {};
 function bhanuDark(){return document.documentElement.getAttribute('data-theme')==='dark';}
 function bhanuChartOpts(h){
@@ -383,18 +398,59 @@ function bhanuFetchJson(url, timeoutMs){
     throw e;
   });
 }
+function bhanuLiveLineTick(id, symbol){
+  // One live tick: fetch the latest price and move the line's end in
+  // place — append when the market clock advanced, else update the
+  // last point's value. No reload, no full re-fetch.
+  var st=window.bhanuLines[id];if(!st){return Promise.reject(new Error('no line'));}
+  return bhanuFetchJson('/api/live?symbol='+encodeURIComponent(symbol)).then(function(p){
+    if(!p||p.error||p.ltp===null||p.ltp===undefined){throw new Error(p&&p.error?p.error:'no live data');}
+    var t=p.time||0, v=Number(p.ltp);
+    if(st.series){
+      if(t>st.lastTime){st.series.update({time:t,value:v});st.lastTime=t;}
+      else{st.series.update({time:st.lastTime,value:v});}
+    }else if(st.el){
+      var line=st.line||[];if(!line.length){throw new Error('no line data');}
+      var last=line[line.length-1];
+      if(t>last.time){line.push({time:t,value:v});}else{last.value=v;}
+      bhanuSvgLine(st.el,line,st.color||'#2962ff');
+    }
+    if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
+  });
+}
+function bhanuStartLiveLine(id, symbol){
+  // A line chart ticks every 5 seconds once it has drawn. Every 60th
+  // tick (~5 minutes) it quietly rebases to fresh 5m bars, so the
+  // 1-minute live tail never drifts from the real candles.
+  if(!symbol||window.bhanuLiveTimers[id]){return;}
+  var ticks=0;
+  var run=function(){
+    ticks++;
+    if(ticks%60===0){
+      bhanuFetchJson('/api/intraday?symbol='+encodeURIComponent(symbol)).then(function(p2){
+        var st=window.bhanuLines[id];
+        if(p2&&!p2.error&&p2.line&&p2.line.length&&st){
+          if(st.series){st.series.setData(p2.line);}
+          st.line=p2.line.slice();
+          st.lastTime=p2.line[p2.line.length-1].time;
+          if(st.el){bhanuSvgLine(st.el,p2.line,st.color||'#2962ff');}
+        }
+      }).catch(function(){});
+      return;
+    }
+    bhanuLiveLineTick(id,symbol).catch(function(){});
+  };
+  window.bhanuLiveTimers[id]=setInterval(run,5000);
+  run();
+}
 function bhanuLineRender(id, p, symbol){
   var el=document.getElementById(id);if(!el)return;
   if(!p||!p.line||p.line.length===0){bhanuUnavailable(el,p&&p.error?p.error:'no price data');return;}
-  var fetchLine=function(){
-    return bhanuFetchJson('/api/intraday?symbol='+encodeURIComponent(symbol)).then(function(p2){
-      if(!p2||p2.error||!p2.line||!p2.line.length){throw new Error(p2&&p2.error?p2.error:'no line data');}
-      return p2;
-    });
-  };
+  var lastTime=p.line[p.line.length-1].time;
   if(typeof LightweightCharts==='undefined'){
     bhanuSvgLine(el,p.line,p.color||'#2962ff');
-    if(symbol){window.bhanuRefreshers.push(function(){return fetchLine().then(function(p2){bhanuSvgLine(el,p2.line,p.color||'#2962ff');});});}
+    window.bhanuLines[id]={el:el,series:null,line:p.line.slice(),lastTime:lastTime,color:p.color||'#2962ff'};
+    bhanuStartLiveLine(id,symbol);
     return;
   }
   var o=bhanuChartOpts(260);o.width=el.clientWidth||900;
@@ -402,9 +458,8 @@ function bhanuLineRender(id, p, symbol){
   var s=ch.addLineSeries({color:p.color||'#2962ff',lineWidth:2});
   s.setData(p.line);ch.timeScale().fitContent();
   window.addEventListener('resize',function(){ch.applyOptions({width:el.clientWidth||900});});
-  if(symbol){
-    window.bhanuRefreshers.push(function(){return fetchLine().then(function(p2){s.setData(p2.line);});});
-  }
+  window.bhanuLines[id]={el:el,series:s,line:p.line.slice(),lastTime:lastTime,color:p.color||'#2962ff'};
+  bhanuStartLiveLine(id,symbol);
 }
 function bhanuLineChart(id, symbol){
   var el=document.getElementById(id);if(!el)return;
@@ -687,6 +742,13 @@ function bhanuQuoteRefresh(){
       if(pe){pe.textContent='data unavailable';}
     });
   });
+  // Quotes tick every 5 seconds too — the price on the card moves
+  // while you watch, it does not wait for the 60-second cycle.
+  if(!window.bhanuQuoteTimer){
+    window.bhanuQuoteTimer=setInterval(function(){
+      bhanuQuoteFetch().catch(function(){});
+    },5000);
+  }
   window.bhanuRefreshers.push(function(){return bhanuQuoteFetch();});
 }
 function bhanuNewsFetch(lang){
@@ -757,6 +819,51 @@ function bhanuOrbHitsFetch(){
     });
   };
   load().catch(function(e){el.innerHTML='<p class="muted">ORB scan load nahi ho paya — page refresh karein.</p>';});
+  window.bhanuRefreshers.push(load);
+}
+function bhanuRobotFetch(){
+  var el=document.getElementById('robot-status');
+  if(!el){return;}
+  var load=function(){
+    return fetch('/api/robot').then(function(r){
+      if(!r.ok){throw new Error('robot '+r.status);}return r.json();
+    }).then(function(d){
+      if(!d||!d.html){throw new Error(d&&d.error?d.error:'no robot data');}
+      el.innerHTML=d.html;
+      if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
+    });
+  };
+  load().catch(function(e){el.innerHTML='<p class="muted">Robot status load nahi ho paya — page refresh karein.</p>';});
+  window.bhanuRefreshers.push(load);
+}
+function bhanuLevelsMiniFetch(){
+  var el=document.getElementById('levels-mini');
+  if(!el){return;}
+  var load=function(){
+    return fetch('/api/levelsmini').then(function(r){
+      if(!r.ok){throw new Error('levelsmini '+r.status);}return r.json();
+    }).then(function(d){
+      if(!d||!d.html){throw new Error(d&&d.error?d.error:'no levels data');}
+      el.innerHTML=d.html;
+      if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
+    });
+  };
+  load().catch(function(e){el.innerHTML='<p class="muted">Levels load nahi ho paye — page refresh karein.</p>';});
+  window.bhanuRefreshers.push(load);
+}
+function bhanuTmMiniFetch(){
+  var el=document.getElementById('tm-mini');
+  if(!el){return;}
+  var load=function(){
+    return fetch('/api/tmmini').then(function(r){
+      if(!r.ok){throw new Error('tmmini '+r.status);}return r.json();
+    }).then(function(d){
+      if(!d||!d.html){throw new Error(d&&d.error?d.error:'no time machine data');}
+      el.innerHTML=d.html;
+      if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
+    });
+  };
+  load().catch(function(e){el.innerHTML='<p class="muted">Time Machine load nahi ho paya — page refresh karein.</p>';});
   window.bhanuRefreshers.push(load);
 }
 function bhanuOrbBreakdown(sym){
@@ -933,21 +1040,24 @@ def _index_cards_html() -> str:
     return f"<div class='index-cards'>{cards}</div>"
 
 
-def _news_feed_html(lang: str) -> str:
+def _news_feed_html(lang: str, news: dict | None = None) -> str:
     """Prominent news feed section (bot checked, automatic).
 
     Each headline is a card row with source + time and a "Bot ne check
     kiya" label. Used on home and /skills. A failed fetch shows an
-    honest "unavailable" — never an empty or fake feed.
+    honest "unavailable" — never an empty or fake feed. When the live
+    engine has a warmed news check, pass it in (``news``) so the page
+    never waits on a fresh fetch.
     """
     t = lambda k: i18n_mod.t(k, lang)
-    try:
-        news = _cached("news:NIFTY", 300, lambda: news_mod.check_symbol("NIFTY"))
-    except Exception as exc:  # noqa: BLE001
-        return (
-            f"<div class='card'><h3>{t('news')} — News Feed</h3>"
-            f"<p class='muted'>Bot ne abhi check kiya — News unavailable ({_esc(exc)})</p></div>"
-        )
+    if news is None:
+        try:
+            news = _cached("news:NIFTY", 300, lambda: news_mod.check_symbol("NIFTY"))
+        except Exception as exc:  # noqa: BLE001
+            return (
+                f"<div class='card'><h3>{t('news')} — News Feed</h3>"
+                f"<p class='muted'>Bot ne abhi check kiya — News unavailable ({_esc(exc)})</p></div>"
+            )
     latest = news.get("latest", [])[:8]
     sources = news.get("sources", {}) or {}
     source_line = (
@@ -1061,11 +1171,13 @@ def _breakdown_for(lang: str, symbol: str, direction: str, entry: float,
 
 def home(lang: str) -> str:
     """Home page — renders INSTANTLY from local data only (paper
-    summary). Index quotes, intraday charts, flow, sector map, news
-    and ORB hits all load lazily from /api/* after the page — no
-    Yahoo fetch ever blocks a page render. Each section shows a
-    "loading" state until its data arrives; a failed fetch shows an
-    honest message, never a blank box."""
+    summary). Index quotes, intraday charts, flow, sector map, news,
+    ORB hits, robot status, levels and Time Machine summaries all load
+    lazily from /api/* after the page — no fetch ever blocks a page
+    render. Each section shows a "loading" state until its data
+    arrives; a failed fetch shows an honest message, never a blank box.
+    The live engine keeps every section warm in the background, so a
+    repeat visit shows data at once."""
     t = lambda k: i18n_mod.t(k, lang)
     today = datetime.now(IST).date()
     try:
@@ -1116,19 +1228,36 @@ def home(lang: str) -> str:
         "<div class='card' id='orb-hits'><h3>ORB Hits — today</h3>"
         "<p class='loading'>ORB scan load ho raha hai…</p></div>"
     )
+    # (f) Robot status — the live engine, in its own card (lazy).
+    robot_html = (
+        "<div class='card' id='robot-status'><h3>Robot — live engine</h3>"
+        "<p class='loading'>Robot status load ho raha hai…</p></div>"
+    )
+    # (g) Levels mini-summary — support/resistance at a glance (lazy).
+    levels_mini_html = (
+        "<div class='card' id='levels-mini'><h3>Levels — indices</h3>"
+        "<p class='loading'>Levels load ho raha hai…</p></div>"
+    )
+    # (h) Time Machine mini-summary — today's setup + replay odds (lazy).
+    tm_mini_html = (
+        "<div class='card' id='tm-mini'><h3>Time Machine — today</h3>"
+        "<p class='loading'>Time Machine load ho raha hai…</p></div>"
+    )
     body = (
         f"<div class='card'><h3>{t('home')} — indices</h3>"
         f"{_index_cards_html()}"
         f"{paper_html}"
         f"<p>{t('flat_by')}: 15:15 IST. ORB range 09:15–09:30 IST.</p></div>"
         f"{chart_cards}{flow_html}{sector_html}{news_html}{orb_html}"
+        f"{robot_html}{levels_mini_html}{tm_mini_html}"
     )
     return _page(
         lang, t("home"), body,
         head_extra=_chart_lib_tag(),
         scripts=_chart_js()
         + f"<script>bhanuFlowChart('flow-chart');bhanuSectorMap('sector-map');"
-          f"bhanuQuoteRefresh();bhanuNewsRefresh('{lang}');bhanuOrbHitsFetch();{lazy_calls}</script>",
+          f"bhanuQuoteRefresh();bhanuNewsRefresh('{lang}');bhanuOrbHitsFetch();"
+          f"bhanuRobotFetch();bhanuLevelsMiniFetch();bhanuTmMiniFetch();{lazy_calls}</script>",
         live=True,
     )
 
@@ -1236,6 +1365,19 @@ def _signal_breakdown_html(sig: dict) -> str:
         size_note = " (half size)"
     elif sig.get("size_factor") == 0.0:
         size_note = " (no trade)"
+    robot_line = ""
+    try:
+        st = poller_mod.status()
+        if st.get("running"):
+            ticks = st.get("ticks", {})
+            robot_line = (
+                f"<p class='muted'>Robot — data as of "
+                f"{_esc(ticks.get('intraday', '—'))} · news checked "
+                f"{_esc(st.get('news_checked_at', '—'))} · "
+                f"{st.get('symbols_scanned', 0)} symbols scanned</p>"
+            )
+    except Exception:  # noqa: BLE001 - the breakdown never depends on the engine
+        robot_line = ""
     return (
         f"<div class='card'><h3>Signal breakdown — "
         f"{_esc(sig.get('symbol', ''))} {_esc(sig.get('direction', ''))}</h3>"
@@ -1244,13 +1386,17 @@ def _signal_breakdown_html(sig: dict) -> str:
         f"<p>Entry {_f(sig.get('entry'))} | SL {_f(sig.get('stop'))} | "
         f"TP1 {_f(sig.get('tp1'))} | TP2 {_f(sig.get('tp2'))} | "
         f"TP3 {_f(sig.get('tp3'))}</p>"
-        f"{lines}</div>"
+        f"{lines}{robot_line}</div>"
     )
 
 
 def _orb_scan() -> dict:
-    """ORB scan result — fresh watchlist file (<300s) or a cached scan.
-    Shared by /orb and /api/orbchart so both see the same hits."""
+    """ORB scan result — live engine first (warmed every 2 min), then
+    a fresh watchlist file (<300s), then a cached scan. Shared by /orb
+    and /api/orbchart so both see the same hits."""
+    warmed = poller_mod.get_orb()
+    if warmed is not None:
+        return warmed
     watchlist = ROOT / "data" / "watchlist.json"
     if watchlist.exists() and time.time() - watchlist.stat().st_mtime < 300:
         try:
@@ -1729,7 +1875,11 @@ def paper_page(lang: str) -> str:
 
 
 def _api_flow() -> dict:
-    """Smart Money Flow JSON (cached 5 min — 39 symbols take a while)."""
+    """Smart Money Flow JSON — live engine first (warmed every 5 min),
+    on-demand fetch (cached 5 min) only when the engine has nothing."""
+    warmed = poller_mod.get_flow()
+    if warmed is not None:
+        return warmed
     try:
         return _cached("api:flow", 300, charts_mod.flow_series)
     except Exception as exc:  # noqa: BLE001
@@ -1737,7 +1887,11 @@ def _api_flow() -> dict:
 
 
 def _api_sectors() -> dict:
-    """Sector map JSON (same flow data, so no second round of fetches)."""
+    """Sector map JSON — live engine first, same flow data, so no
+    second round of fetches."""
+    warmed = poller_mod.get_sectors()
+    if warmed is not None:
+        return warmed
     try:
         flow = _cached("api:flow", 300, charts_mod.flow_series)
         return charts_mod.sector_map(flow)
@@ -1754,7 +1908,15 @@ _QUOTE_SYMBOLS: tuple[tuple[str, str], ...] = (
 
 
 def _api_quotes() -> dict:
-    """Live index quotes for the home-page refresh (cached 60s)."""
+    """Live index quotes for the home-page refresh.
+
+    The live engine's warmed quotes come first (NSE + fresh spark,
+    in-memory, instant); only when the engine has nothing yet does
+    this fall back to the on-demand fetch (cached 60s)."""
+    warmed = poller_mod.get_quotes()
+    if warmed is not None:
+        return {"quotes": warmed,
+                "as_of": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")}
     out = []
     for symbol, label in _QUOTE_SYMBOLS:
         try:
@@ -1784,10 +1946,17 @@ def _api_quotes() -> dict:
 
 
 def _api_intraday(query: dict) -> dict:
-    """Intraday line/candle payload for one index (cached 60s)."""
+    """Intraday line/candle payload for one index.
+
+    The live engine's warmed 5m bars come first (in-memory, instant);
+    only when the engine has nothing yet does this fall back to the
+    on-demand fetch (cached 60s)."""
     symbol = (query.get("symbol") or ["^NSEI"])[0]
     if symbol not in ("^NSEI", "^NSEBANK", "^BSESN"):
         return {"symbol": symbol, "line": [], "candles": [], "error": f"unknown symbol {symbol}"}
+    warmed = poller_mod.get_intraday(symbol)
+    if warmed is not None:
+        return warmed
     try:
         return _cached(
             f"chart:{symbol}", 60, lambda: charts_mod.intraday_series(symbol)
@@ -1834,13 +2003,16 @@ def _api_levelschart(query: dict) -> dict:
 
 
 def _api_timemachine() -> dict:
-    """Monte Carlo + trade check + backtest (cached 10 min — the
-    backtest refetches a month of bars, so it is slow). Returns the
-    data plus a pre-rendered HTML body for the lazy page load."""
-    try:
-        data = _cached("timemachine", 600, timecheck_mod.collect_timemachine)
-    except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc)}
+    """Monte Carlo + trade check + backtest — live engine first
+    (warmed every 10 min), on-demand run (cached 10 min) only when
+    the engine has nothing. Returns the data plus a pre-rendered HTML
+    body for the lazy page load."""
+    data = poller_mod.get_timemachine()
+    if data is None:
+        try:
+            data = _cached("timemachine", 600, timecheck_mod.collect_timemachine)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
     out = dict(data)
     out["html"] = _timemachine_body(data)
     return out
@@ -1892,8 +2064,16 @@ def _api_orbbreakdown(query: dict, lang: str) -> dict:
 
 
 def _api_levels(query: dict, lang: str) -> dict:
-    """Levels table HTML fragment (cached 60s). ``top_symbol`` is the
-    first row, for the lazy candle chart."""
+    """Levels table HTML fragment — live engine first (warmed every
+    2 min), on-demand scan (cached 60s) only when the engine has
+    nothing. ``top_symbol`` is the first row, for the lazy candle chart."""
+    warmed = poller_mod.get_levels()
+    if warmed is not None:
+        rows = warmed.get("levels", [])
+        return {
+            "html": _levels_table_html(warmed, lang),
+            "top_symbol": rows[0].get("symbol", "") if rows else "",
+        }
     try:
         result = _cached("levels", 60, levels_mod.scan_levels)
     except Exception as exc:  # noqa: BLE001
@@ -1941,11 +2121,224 @@ def _api_levelsbreakdown(query: dict, lang: str) -> dict:
 
 
 def _api_news(query: dict, lang: str) -> dict:
-    """News feed HTML fragment for the home-page refresh."""
+    """News feed HTML fragment — the live engine's warmed news check
+    first, so the home-page refresh never waits on a fresh fetch."""
     try:
-        return {"html": _news_feed_html(lang)}
+        return {"html": _news_feed_html(
+            lang, news=poller_mod.get_news("NIFTY"))}
     except Exception as exc:  # noqa: BLE001
         return {"html": "", "error": str(exc)}
+
+
+def _robot_html() -> str:
+    """Robot status card — what the live engine is doing right now.
+
+    Every number comes from the engine's in-memory state (instant,
+    never a fetch): last scan times, symbols scanned, ORB hits, news
+    check time, Time Machine replays, and the best setup the fresh
+    scans found, with entry/SL/TP1/TP2/TP3. When the engine has not
+    scanned yet, the card says it is warming up — never a fake status.
+    """
+    st = poller_mod.status()
+    ticks = st.get("ticks", {})
+
+    def _clock(stamp: str) -> str:
+        # "2026-11-26 14:30:00 IST" -> "14:30:00"
+        return stamp[11:19] if len(stamp) >= 19 else (stamp or "—")
+
+    market = "OPEN" if st.get("market_open") else "closed (slow polls)"
+    head = (
+        f"<p><b>Robot — live engine</b> · market {market} · "
+        f"{'● LIVE' if st.get('fresh') else 'warming up…'}</p>"
+        f"<p class='muted'>Last scans — indices {_clock(ticks.get('indices', ''))} · "
+        f"spark {_clock(ticks.get('spark', ''))} · intraday "
+        f"{_clock(ticks.get('intraday', ''))} · flow "
+        f"{_clock(ticks.get('flow', ''))} · news "
+        f"{_clock(ticks.get('news', ''))} · scans "
+        f"{_clock(ticks.get('scans', ''))} · Time Machine "
+        f"{_clock(ticks.get('timemachine', ''))}</p>"
+        f"<p>{st.get('symbols_scanned', 0)} symbols scanned · "
+        f"{st.get('spark_symbols', 0)} live spark feeds · "
+        f"{st.get('orb_hits', 0)} ORB hit(s) now · news checked "
+        f"{_clock(st.get('news_checked_at', ''))} · Time Machine "
+        f"{st.get('timemachine_replays', 0):,} replays</p>"
+    )
+    backoff = ""
+    if st.get("backoff_until"):
+        backoff = (
+            f"<p class='muted'>Rate-limit backoff until "
+            f"{_esc(st['backoff_until'])} — showing last good data.</p>"
+        )
+    elif st.get("errors"):
+        backoff = (
+            f"<p class='muted'>{st['errors']} fetch error(s) so far — "
+            f"last good data kept.</p>"
+        )
+
+    # Best setup from the fresh scans: a levels signal first, else
+    # the first ORB hit. Entry/SL/TPs are the robot's own numbers.
+    best = ""
+    levels = poller_mod.get_levels()
+    picked = None
+    if levels:
+        for row in levels.get("levels", []) or []:
+            if row.get("signal") and row.get("entry") and row.get("stop"):
+                picked = (row.get("symbol"), row.get("signal"),
+                          row.get("entry"), row.get("stop"))
+                break
+    if picked is None:
+        orb = poller_mod.get_orb()
+        if orb:
+            for hit in orb.get("hits", []) or []:
+                try:
+                    stop = (float(hit["range_high"])
+                            + float(hit["range_low"])) / 2.0
+                    picked = (hit.get("symbol"), hit.get("direction"),
+                              float(hit["close"]), stop)
+                    break
+                except (KeyError, TypeError, ValueError):
+                    continue
+    if picked:
+        symbol, direction, entry, stop = picked
+        tp1, tp2, tp3 = _tp123(str(direction), float(entry), float(stop))
+        best = (
+            f"<p><b>Best setup now: {_esc(symbol)} {_esc(direction)}</b> — "
+            f"entry {entry:,.2f} · SL {stop:,.2f} · TP1 {tp1:,.2f} · "
+            f"TP2 {tp2:,.2f} · TP3 {tp3:,.2f} "
+            f"(fresh scan {_clock(ticks.get('scans', ''))})</p>"
+        )
+    else:
+        best = "<p>No ORB signal right now — robot is watching.</p>"
+    return (
+        f"<div class='card'><h3>Robot — live engine</h3>{head}{best}"
+        f"{backoff}</div>"
+    )
+
+
+def _api_robot() -> dict:
+    """Robot card HTML fragment for the home-page refresh."""
+    try:
+        return {"html": _robot_html()}
+    except Exception as exc:  # noqa: BLE001
+        return {"html": "", "error": str(exc)}
+
+
+def _api_live(query: dict) -> dict:
+    """Live tick for one index: latest price + 1-minute closes.
+
+    Served from the live engine's spark state (in-memory, instant —
+    the indices spark every 5 s). The browser's line charts call this
+    every 5 s and update the last point in place, so the line moves
+    while you watch — no page reload, no 60 s wait. When the engine
+    has not had a spark tick yet, this says so honestly instead of
+    faking a price."""
+    symbol = (query.get("symbol") or ["^NSEI"])[0]
+    if symbol not in ("^NSEI", "^NSEBANK", "^BSESN"):
+        return {"symbol": symbol, "ltp": None, "line": [],
+                "error": f"unknown symbol {symbol}"}
+    entry = poller_mod.get_spark(symbol)
+    if entry is None:
+        return {"symbol": symbol, "ltp": None, "line": [],
+                "error": "live feed warming up — first spark in a few seconds"}
+    closes = entry.get("closes", []) or []
+    line = [{"time": int(c["t"]), "value": float(c["c"])}
+            for c in closes[-400:]]
+    ltp = entry.get("ltp")
+    prev = entry.get("prev")
+    pct = round((ltp / prev - 1) * 100, 2) if ltp and prev else None
+    return {"symbol": symbol, "ltp": ltp, "prev": prev, "change_pct": pct,
+            "time": entry.get("time") or 0, "line": line, "error": None}
+
+
+def _api_poller() -> dict:
+    """Live-engine status (in-memory, instant — never fetches)."""
+    return poller_mod.status()
+
+
+def _levels_mini_html(result: dict) -> str:
+    """Compact levels summary for home: symbol / price / support /
+    resistance / signal (5 columns, wrapped like every table)."""
+    rows = result.get("levels", [])[:3]
+
+    def _fmt(value) -> str:
+        return f"{value:,.2f}" if value is not None else "—"
+
+    body_rows = "".join(
+        f"<tr><td>{_esc(r.get('symbol', ''))}</td><td>{_fmt(r.get('price'))}</td>"
+        f"<td>{_fmt(r.get('nearest_support'))}</td>"
+        f"<td>{_fmt(r.get('nearest_resistance'))}</td>"
+        f"<td>{_esc(r.get('signal') or 'None')}</td></tr>"
+        for r in rows
+    )
+    if not rows:
+        return (
+            "<div class='card'><h3>Levels — indices</h3>"
+            "<p class='muted'>Levels warming up — first scan in progress…</p></div>"
+        )
+    return (
+        f"<div class='card'><h3>Levels — indices</h3>"
+        f"<p class='muted'>As of {_esc(result.get('run_at_ist', ''))} · "
+        f"<a href='/levels'>Full levels page</a></p>"
+        f"<div class='table-wrap'><table>"
+        f"<tr><th>Symbol</th><th>Price</th><th>Support</th>"
+        f"<th>Resistance</th><th>Signal</th></tr>{body_rows}</table></div></div>"
+    )
+
+
+def _api_levelsmini() -> dict:
+    """Levels mini-summary HTML fragment for home."""
+    result = poller_mod.get_levels()
+    if result is None:
+        try:
+            result = _cached("levels", 60, levels_mod.scan_levels)
+        except Exception as exc:  # noqa: BLE001
+            return {"html": "", "error": f"levels unavailable: {exc}"}
+    return {"html": _levels_mini_html(result)}
+
+
+def _tm_mini_html(data: dict) -> str:
+    """Compact Time Machine summary for home: today's best setup +
+    Monte Carlo target-first % (10,000 replays)."""
+    setup = data.get("setup")
+    mc = data.get("monte_carlo", {}) or {}
+    if not setup and not mc.get("available"):
+        return (
+            "<div class='card'><h3>Time Machine — today</h3>"
+            "<p class='muted'>Time Machine warming up — first 10,000-replay "
+            "check in progress…</p></div>"
+        )
+
+    def _fmt(value) -> str:
+        return f"{value:,.2f}" if value is not None else "—"
+
+    lines = ""
+    if setup:
+        lines += (
+            f"<p><b>{_esc(setup.get('symbol', ''))} "
+            f"{_esc(setup.get('signal', ''))}</b> — entry "
+            f"{_fmt(setup.get('entry'))}, stop {_fmt(setup.get('stop'))}, "
+            f"target {_fmt(setup.get('target'))}.</p>"
+        )
+    if mc.get("available"):
+        lines += (
+            f"<p>{mc.get('n', 0):,} replays — target first "
+            f"{mc.get('target_first_pct', 0):.1f}% · stop first "
+            f"{mc.get('stop_first_pct', 0):.1f}% · average "
+            f"{mc.get('avg_r', 0):+.2f}R · "
+            f"<a href='/timemachine'>Full Time Machine</a></p>"
+        )
+    return f"<div class='card'><h3>Time Machine — today</h3>{lines}</div>"
+
+
+def _api_tmmini() -> dict:
+    """Time Machine mini-summary HTML fragment for home."""
+    data = poller_mod.get_timemachine()
+    if data is None:
+        try:
+            data = _cached("timemachine", 600, timecheck_mod.collect_timemachine)
+        except Exception as exc:  # noqa: BLE001
+            return {"html": "", "error": str(exc)}
+    return {"html": _tm_mini_html(data)}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1992,6 +2385,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/news":
                 self._send_json(_api_news(query, lang))
+                return
+            if parsed.path == "/api/live":
+                self._send_json(_api_live(query))
+                return
+            if parsed.path == "/api/poller":
+                self._send_json(_api_poller())
+                return
+            if parsed.path == "/api/robot":
+                self._send_json(_api_robot())
+                return
+            if parsed.path == "/api/levelsmini":
+                self._send_json(_api_levelsmini())
+                return
+            if parsed.path == "/api/tmmini":
+                self._send_json(_api_tmmini())
                 return
             if parsed.path.startswith("/static/"):
                 served = _static_file(parsed.path[len("/static/"):])
@@ -2053,6 +2461,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    try:
+        poller_mod.start()
+    except Exception:  # noqa: BLE001 - the server must start even if the engine cannot
+        pass
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Bhanu Indian Day Trader running at http://localhost:{PORT} (paper trading only)")
     server.serve_forever()
