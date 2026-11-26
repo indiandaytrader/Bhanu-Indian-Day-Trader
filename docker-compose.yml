@@ -1,0 +1,8 @@
+services:
+  bhanu-indian-day-trader:
+    build: .
+    ports:
+      - "8810:8810"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
