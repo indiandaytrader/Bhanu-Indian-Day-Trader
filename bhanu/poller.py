@@ -1,3 +1,4 @@
+# bhanu/poller.py
 """Background live-data engine for the Bhanu Indian Day Trader dashboard.
 
 The dashboard never fetches market data while rendering a page. Instead,
@@ -37,6 +38,8 @@ Rules:
 from __future__ import annotations
 
 import json
+import os
+from bhanu import upstox, webhooks
 import threading
 import time
 import urllib.error
@@ -48,6 +51,7 @@ from zoneinfo import ZoneInfo
 
 from bhanu import charts as charts_mod
 from bhanu import data as data_mod
+from bhanu import options as options_mod
 
 IST = ZoneInfo("Asia/Kolkata")
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -137,6 +141,7 @@ def _fresh_state() -> dict:
         "running": False,
         "started_at": "",
         "indices": {},
+        "chains": {},
         "spark": {},
         "intraday": {},
         "flow": None,
@@ -203,8 +208,8 @@ def _interval(fast_s: float, slow_s: float) -> float:
 def _fetch_json(url: str, timeout: float = FETCH_TIMEOUT_S) -> dict:
     """GET a JSON URL: first host, then the fallback host on 429/5xx."""
     last_error: Exception | None = None
-    for host_url in (url, url.replace(
-            "query1.finance.yahoo.com", "query2.finance.yahoo.com", 1)):
+    for host_url in dict.fromkeys((url, url.replace(
+            "query1.finance.yahoo.com", "query2.finance.yahoo.com", 1))):
         try:
             req = urllib.request.Request(host_url, headers=USER_AGENT)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -218,7 +223,7 @@ def _fetch_json(url: str, timeout: float = FETCH_TIMEOUT_S) -> dict:
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last_error = PollerError(f"network error for {host_url}: {exc}")
             continue
-    raise PollerError(f"could not fetch {url}: {last_error}")
+    raise last_error
 
 
 def _f(value) -> float | None:
@@ -447,7 +452,14 @@ def _tick_news() -> None:
     from bhanu import news as news_mod
 
     ok = False
-    for symbol in NEWS_SYMBOLS:
+    from bhanu import paper as paper_mod
+
+    try:
+        positions = paper_mod.list_positions()
+    except (OSError, ValueError):
+        positions = []
+    symbols = dict.fromkeys((*NEWS_SYMBOLS, *(p["symbol"] for p in positions)))
+    for symbol in symbols:
         try:
             result = news_mod.check_symbol(symbol)
         except Exception:  # noqa: BLE001 - keep last good value
@@ -581,7 +593,62 @@ def _load_snapshot() -> bool:
 # Engine control
 # ---------------------------------------------------------------------------
 
+def _tick_chains() -> None:
+    for symbol in ("NIFTY", "BANKNIFTY"):
+        try:
+            result = options_mod.fetch_chain(symbol)
+        except Exception as exc:
+            result = {"error": str(exc) or "NSE feed unavailable"}
+        if result.get("error") and os.environ.get("UPSTOX_ACCESS_TOKEN"):
+            nse_error = result["error"]
+            result = upstox.fetch(symbol)
+            if result.get("error"):
+                result = {"error": f"{nse_error} · {result['error']}"}
+        error = result.get("error")
+        with _LOCK:
+            prior = STATE["chains"].get(symbol, {})
+            STATE["chains"][symbol] = {
+                "data": prior.get("data") if error else result,
+                "received": prior.get("received") if error else _now_iso(),
+                "error": error,
+            }
+        if error:
+            _bump_errors()
+        else:
+            _mark_tick("chain_" + symbol.lower())
+
+
+def get_chain(symbol: str) -> dict:
+    """Published chain snapshots are replaced atomically and never mutated."""
+    with _LOCK:
+        return dict(STATE["chains"].get(symbol, {}))
+
+
+def _tick_alerts():
+    if not (os.environ.get("DISCORD_WEBHOOK_URL") or os.environ.get("TELEGRAM_WEBHOOK_URL")):
+        return
+    now = _now_ist()
+    extra = ()
+    if os.environ.get("TELEGRAM_WEBHOOK_URL"):
+        from bhanu import config, paper
+        with _LOCK:
+            news = [item for result in STATE["news"].values() for item in result.get("items", [])]
+        try:
+            risk = paper.day_summary(now.date())["risk_taken"]
+            limit = config.load_config().max_daily_loss
+        except (OSError, ValueError, KeyError):
+            _bump_errors()
+            risk, limit = 0, None
+        ticks = {symbol: get_spark(key) for symbol, key in INDEX_YAHOO.items()}
+        extra = webhooks.snapshot_alerts(now, (get_levels() or {}).get("levels", []),
+                                        ticks, news, risk, limit)
+    if webhooks.deliver(now, (get_orb() or {}).get("hits", []), extra):
+        _bump_errors()
+
+
 _JOBS: tuple[tuple[str, float, float, object], ...] = (
+    ("paper_alerts", 20, 20, _tick_alerts),
+    ("chains", 120, 900, _tick_chains),
     ("indices", POLL_INDICES_FAST_S, POLL_INDICES_SLOW_S, _tick_indices),
     ("spark_fast", POLL_SPARK_FAST_S, POLL_SPARK_SLOW_S, _tick_spark_fast),
     ("spark_full", POLL_SPARK_FULL_FAST_S, POLL_SPARK_FULL_SLOW_S,

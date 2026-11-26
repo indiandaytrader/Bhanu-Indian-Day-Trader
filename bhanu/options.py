@@ -1,3 +1,4 @@
+# bhanu/options.py
 """NIFTY / BANKNIFTY option chain with OI and PCR (NSE India, public API).
 
 Fetches the NSE India option-chain-indices endpoint
@@ -23,6 +24,8 @@ from __future__ import annotations
 import argparse
 import http.cookiejar
 import json
+import math
+from datetime import datetime
 import sys
 import urllib.error
 import urllib.request
@@ -97,58 +100,87 @@ def fetch_chain(symbol: str = "NIFTY", timeout: float = 15.0) -> dict:
     except (ValueError, UnicodeDecodeError):
         return {"error": "NSE returned a response that is not valid JSON — try again later"}
 
-    records = payload.get("records")
-    if not isinstance(records, dict) or not isinstance(records.get("data"), list):
-        return {"error": "NSE returned an unexpected option-chain format — try again later"}
-    data = records["data"]
-    if not data:
-        return {"error": f"NSE returned an empty option chain for {symbol}"}
-
-    underlying = records.get("underlyingValue")
-    strikes: list[dict] = []
-    for row in data:
-        strike = row.get("strikePrice")
-        if strike is None:
-            continue
-        strikes.append(
-            {
-                "strike": float(strike),
-                "ce": _parse_side(row.get("CE")),
-                "pe": _parse_side(row.get("PE")),
-            }
-        )
-    if not strikes:
-        return {"error": f"NSE returned no usable strikes for {symbol}"}
-    strikes.sort(key=lambda s: s["strike"])
-
-    total_ce_oi = sum((s["ce"] or {}).get("oi") or 0 for s in strikes)
-    total_pe_oi = sum((s["pe"] or {}).get("oi") or 0 for s in strikes)
-    pcr = (total_pe_oi / total_ce_oi) if total_ce_oi else None
-    atm = min(strikes, key=lambda s: abs(s["strike"] - float(underlying)))["strike"] if underlying else None
-
-    return {
-        "symbol": symbol,
-        "underlying": float(underlying) if underlying is not None else None,
-        "as_on": records.get("timestamp"),
-        "strikes": strikes,
-        "total_ce_oi": total_ce_oi,
-        "total_pe_oi": total_pe_oi,
-        "pcr": pcr,
-        "atm_strike": atm,
-        "max_pain": _max_pain(strikes),
-    }
+    return parse_chain(symbol, payload)
 
 
-def _parse_side(side: Optional[dict]) -> Optional[dict]:
-    """One CE/PE side of a strike row, or None when the side is absent."""
+def _number(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        n = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return n if math.isfinite(n) else None
+
+
+def _parse_side(side):
     if not isinstance(side, dict):
         return None
+    oi = _number(side.get("openInterest"))
+    price = _number(side.get("lastPrice"))
+    iv = _number(side.get("impliedVolatility"))
     return {
-        "oi": int(side.get("openInterest") or 0),
-        "oi_change": int(side.get("changeinOpenInterest") or 0),
-        "last_price": float(side["lastPrice"]) if side.get("lastPrice") is not None else None,
-        "iv": float(side["impliedVolatility"]) if side.get("impliedVolatility") is not None else None,
+        "oi": int(oi) if oi is not None and oi >= 0 and oi.is_integer() else None,
+        "oi_change": _number(side.get("changeinOpenInterest")),
+        "last_price": price if price is not None and price >= 0 else None,
+        "iv": iv if iv is not None and iv > 0 else None,
     }
+
+
+def _expiry_summary(strikes, underlying):
+    def total(side):
+        values = [row[side]["oi"] for row in strikes if row[side] is not None]
+        return sum(values) if values and None not in values else None
+
+    calls, puts = total("ce"), total("pe")
+    atm = min(strikes, key=lambda row: abs(row["strike"] - underlying)) if underlying else None
+    return {
+        "strikes": strikes,
+        "atm_strike": atm["strike"] if atm else None,
+        "total_ce_oi": calls,
+        "total_pe_oi": puts,
+        "pcr": puts / calls if calls and puts is not None else None,
+        "max_pain": _max_pain(strikes) if calls is not None and puts is not None
+                    and calls + puts > 0 else None,
+    }
+
+
+def parse_chain(symbol, payload):
+    """Use only dated contracts. Keep each expiry's OI and payouts independent."""
+    records = payload.get("records") if isinstance(payload, dict) else None
+    if not isinstance(records, dict) or not isinstance(records.get("data"), list):
+        return {"error": "NSE returned an unexpected option-chain format"}
+    underlying = _number(records.get("underlyingValue"))
+    if underlying is not None and underlying <= 0:
+        underlying = None
+    groups = {}
+    for row in records["data"]:
+        if not isinstance(row, dict):
+            continue
+        strike = _number(row.get("strikePrice"))
+        if strike is None or strike <= 0:
+            continue
+        for key in ("CE", "PE"):
+            side = row.get(key)
+            if not isinstance(side, dict) or not side:
+                continue
+            try:
+                expiry = datetime.strptime(side.get("expiryDate") or row.get("expiryDate"),
+                                           "%d-%b-%Y").date().isoformat()
+            except (ValueError, TypeError):
+                return {"error": "NSE returned a contract without a usable expiry"}
+            strikes = groups.setdefault(expiry, {})
+            contract = strikes.setdefault(strike, {"strike": strike, "ce": None, "pe": None})
+            contract[key.lower()] = _parse_side(side)
+    if not groups:
+        return {"error": f"NSE returned no usable dated contracts for {symbol}"}
+    expiries = {
+        day: _expiry_summary([rows[k] for k in sorted(rows)], underlying)
+        for day, rows in sorted(groups.items())
+    }
+    first = next(iter(expiries))
+    return {"symbol": symbol, "underlying": underlying, "as_on": records.get("timestamp"),
+            "expiry": first, "expiries": expiries, **expiries[first]}
 
 
 def _max_pain(strikes: Sequence[dict]) -> Optional[float]:
@@ -157,23 +189,16 @@ def _max_pain(strikes: Sequence[dict]) -> Optional[float]:
     Payout at strike S = sum over CE of max(0, S - K) * CE_OI
                        + sum over PE of max(0, K - S) * PE_OI.
     """
-    best_strike: Optional[float] = None
-    best_payout: Optional[float] = None
-    for candidate in strikes:
-        s = candidate["strike"]
-        payout = 0.0
-        for row in strikes:
-            k = row["strike"]
-            ce_oi = (row["ce"] or {}).get("oi") or 0
-            pe_oi = (row["pe"] or {}).get("oi") or 0
-            if s > k:
-                payout += (s - k) * ce_oi
-            if k > s:
-                payout += (k - s) * pe_oi
-        if best_payout is None or payout < best_payout:
-            best_payout = payout
-            best_strike = s
-    return best_strike
+    # Between strikes the payout slope is calls below minus puts above.
+    # At a strike, both its CALL and PUT OI increase the slope. The
+    # first nonnegative slope selects the lowest minimum on a tie.
+    slope = -sum((row["pe"] or {}).get("oi") or 0 for row in strikes)
+    for row in sorted(strikes, key=lambda row: row["strike"]):
+        slope += (row["ce"] or {}).get("oi") or 0
+        slope += (row["pe"] or {}).get("oi") or 0
+        if slope >= 0:
+            return row["strike"]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +226,7 @@ def pcr_summary(chain: dict) -> dict:
         best: Optional[dict] = None
         for row in strikes:
             entry = row.get(side) or {}
-            if best is None or (entry.get("oi") or 0) > ((best.get(side) or {}).get("oi") or 0):
+            if entry.get("oi") is not None and (best is None or entry["oi"] > best[side]["oi"]):
                 best = row
         return best["strike"] if best is not None else None
 
@@ -298,9 +323,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Underlying: {summary['underlying']}")
         print(f"ATM strike: {summary['atm_strike']}")
         print(f"Max pain:   {summary['max_pain']}")
-        print(f"Total CE OI: {summary['total_ce_oi']:,}")
-        print(f"Total PE OI: {summary['total_pe_oi']:,}")
-        print(f"PCR: {summary['pcr']:.2f} — {summary['pcr_read']}")
+        print(f"Expiry: {chain['expiry']}")
+        for label, key, spec in (("Total CE OI", "total_ce_oi", ","),
+                                 ("Total PE OI", "total_pe_oi", ","),
+                                 ("PCR", "pcr", ".2f")):
+            value = summary[key]
+            print(f"{label}: {format(value, spec) if value is not None else 'unavailable'}")
         print(f"Top CE OI strike: {summary['top_ce_oi_strike']}")
         print(f"Top PE OI strike: {summary['top_pe_oi_strike']}")
         return 0

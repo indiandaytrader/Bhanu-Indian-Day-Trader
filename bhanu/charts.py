@@ -1,3 +1,4 @@
+# bhanu/charts.py
 """Chart data for the dashboard (candlestick / line / flow / sector charts).
 
 Builds JSON-ready payloads from Yahoo 5m bars (via ``bhanu.data``) for
@@ -463,6 +464,11 @@ def _overlay_payload(
         "symbol": symbol,
         "candles": candles,
         "vwap": vwap_line,
+        # Presentation series from the already-loaded frame; keep OHLC and feeds intact.
+        "volume": [{"time": _unix(ts), "value": float(value)}
+                   for ts, value in chart_bars["volume"].items()
+                   if pd.notna(value) and 0 <= value < float("inf")]
+                  if "volume" in chart_bars and chart_bars["volume"].gt(0).any() else [],
         "lines": lines,
         "markers": markers,
         "boxes": boxes,

@@ -1,3 +1,4 @@
+# bhanu/scanner.py
 """Scanner: daily setups (closes only) and the intraday ORB scan.
 
 Daily setups (computed from daily closes only):
@@ -30,7 +31,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -242,6 +243,10 @@ def scan_orb(universe: dict[str, str] | None = None) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001 - report, don't crash
             failed.append({"symbol": name, "reason": str(exc)})
             continue
+        if not bars.empty:
+            cutoff = datetime.now(IST) - timedelta(minutes=5)
+            local_index = bars.index if bars.index.tz is not None else bars.index.tz_localize(IST)
+            bars = bars[local_index <= cutoff]
         if bars.empty:
             failed.append({"symbol": name, "reason": "no intraday bars returned"})
             continue
