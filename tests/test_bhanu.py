@@ -97,6 +97,20 @@ class TestScanner(unittest.TestCase):
         hit = scanner_mod.orb_hit(bars)
         self.assertIsNone(hit)
 
+    def test_scan_orb_with_live_bars_does_not_crash_on_timezone(self):
+        # Regression: scan_orb called datetime.now(IST) where IST is the
+        # plain string "Asia/Kolkata" from bhanu.data — TypeError, so the
+        # poller swallowed the error and /api/orb stayed "warming up"
+        # forever on the live deploy.
+        from unittest.mock import patch
+
+        bars = _bars_5m()
+        with patch.object(scanner_mod, "fetch_intraday_bars", return_value=bars):
+            result = scanner_mod.scan_orb({"NIFTY": "^NSEI"})
+        self.assertEqual(result["scan"], "orb")
+        self.assertEqual(result["hit_count"], 1)
+        self.assertEqual(result["hits"][0]["direction"], "long")
+
 
 class TestEntryExit(unittest.TestCase):
     def test_orb_entry_long(self):
