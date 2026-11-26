@@ -307,7 +307,7 @@ def collect_skill_status(live: bool = True) -> list[dict[str, str]]:
         if not live:
             return "Live status needs a live run — see home."
         if news is None:
-            return "Unavailable — news check failed."
+            return "News unavailable — news check failed."
         items = news.get("items", []) or []
         latest = news.get("latest", []) or []
         sources = news.get("sources", {}) or {}
@@ -325,12 +325,14 @@ def collect_skill_status(live: bool = True) -> list[dict[str, str]]:
         yahoo_note = sources.get("yahoo_headlines", "")
         parts.append(f"NSE announcements: {nse_note}; Yahoo headlines: {yahoo_note}")
         parts.append(f"Moving (>=3%): {moving}")
+        prefix = "Bot ne check kiya — "
         if not items and not latest:
             return (
-                "No fresh items and no headlines returned right now "
+                prefix
+                + "no fresh items and no headlines returned right now "
                 f"({'; '.join(parts)}). News is a filter, never an entry signal alone."
             )
-        return " | ".join(parts)
+        return prefix + " | ".join(parts)
 
     def _entry_status() -> str:
         if not live:

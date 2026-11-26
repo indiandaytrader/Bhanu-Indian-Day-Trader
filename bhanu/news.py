@@ -154,7 +154,12 @@ def fetch_nse_announcements(symbol: str) -> tuple[list[dict[str, Any]], str]:
     display = symbol.replace(".NS", "").upper()
     try:
         opener = urllib.request.build_opener()
-        opener.addheaders = [("User-Agent", USER_AGENT)]
+        opener.addheaders = [
+            ("User-Agent", USER_AGENT),
+            ("Accept", "application/json, text/plain, */*"),
+            ("Accept-Language", "en-IN,en;q=0.9"),
+            ("Referer", "https://www.nseindia.com/"),
+        ]
         # Session cookie from the homepage, then the announcements API.
         with opener.open("https://www.nseindia.com", timeout=REQUEST_TIMEOUT_S):
             pass
@@ -202,15 +207,66 @@ def fetch_bse_announcements(symbol: str) -> tuple[list[dict[str, Any]], str]:
     )
 
 
+def fetch_yahoo_search_news(symbol: str) -> tuple[list[dict[str, Any]], str]:
+    """Headlines for ``symbol`` from Yahoo's search API (RSS fallback).
+
+    The per-symbol RSS feed often returns an empty channel for Indian
+    symbols; the search API (v1/finance/search) still returns real
+    headlines. Returns ``(items, note)`` like the other fetchers.
+    Items have keys: source, title, link, published, tags.
+    """
+    query = symbol.replace(".NS", "").upper()
+    url = (f"https://query1.finance.yahoo.com/v1/finance/search"
+           f"?q={query}&newsCount=5&quotesCount=0")
+    try:
+        raw = _http_get(url)
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 - best effort, report it
+        return [], f"Yahoo search news unavailable: {exc}"
+    items: list[dict[str, Any]] = []
+    for row in payload.get("news", []) if isinstance(payload, dict) else []:
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        published = ""
+        ts = row.get("providerPublishTime")
+        if ts:
+            try:
+                published = datetime.fromtimestamp(
+                    int(ts), tz=timezone.utc
+                ).strftime("%d %b %Y %H:%M UTC")
+            except (TypeError, ValueError):
+                published = ""
+        items.append(
+            {
+                "source": "Yahoo headline",
+                "title": title,
+                "link": str(row.get("link") or ""),
+                "published": published,
+                "tags": tag_text(title),
+            }
+        )
+    note = "" if items else "no Yahoo search news returned for this symbol"
+    return items, note
+
+
 def fetch_yahoo_headlines(symbol: str) -> tuple[list[dict[str, Any]], str]:
-    """Headline RSS for ``symbol`` from Yahoo Finance India (best effort)."""
+    """Headline RSS for ``symbol`` from Yahoo Finance India (best effort).
+
+    Falls back to the Yahoo search API when the RSS channel is empty
+    (common for Indian symbols). Returns ``(items, note)``.
+    """
     yahoo_symbol = symbol if "." in symbol else f"{symbol}.NS"
     url = f"https://finance.yahoo.com/rss/headline?s={yahoo_symbol}"
     try:
         raw = _http_get(url)
         root = ET.fromstring(raw)
-    except Exception as exc:  # noqa: BLE001 - best effort, report it
-        return [], f"Yahoo headlines unavailable: {exc}"
+    except Exception as exc:  # noqa: BLE001 - best effort, try the fallback
+        rss_note = f"Yahoo headlines RSS unavailable: {exc}"
+        items, search_note = fetch_yahoo_search_news(symbol)
+        if items:
+            return items, ""
+        return [], f"{rss_note}; {search_note}"
     items: list[dict[str, Any]] = []
     for item in root.iter("item"):
         title = (item.findtext("title") or "").strip()
@@ -227,8 +283,16 @@ def fetch_yahoo_headlines(symbol: str) -> tuple[list[dict[str, Any]], str]:
                 "tags": tag_text(title),
             }
         )
-    note = "" if items else "no Yahoo headlines returned for this symbol"
-    return items, note
+    if items:
+        return items, ""
+    # RSS returned an empty channel — fall back to the search API.
+    search_items, search_note = fetch_yahoo_search_news(symbol)
+    if search_items:
+        return search_items, ""
+    return [], (
+        "no Yahoo headlines returned for this symbol; "
+        f"search API: {search_note}"
+    )
 
 
 # ---------------------------------------------------------------------------

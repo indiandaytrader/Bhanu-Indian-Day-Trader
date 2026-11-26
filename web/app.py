@@ -8,6 +8,7 @@ Stdlib-only HTTP server (no framework). Pages:
   /sizing   position sizing calculator (four limits, budget is an input)
   /paper    paper trading ledger
   /skills   all 11 DayTrader skills — what each does + live status
+  /timemachine  Monte Carlo Time Machine + trade check + ORB backtest
 
 Data is fetched live (Yahoo / NSE) with short caching. When a source is
 unavailable the page says so plainly — no fake data is ever shown.
@@ -35,6 +36,7 @@ from bhanu import paper as paper_mod
 from bhanu import scanner as scanner_mod
 from bhanu import sizing as sizing_mod
 from bhanu import skills as skills_mod
+from bhanu import timecheck as timecheck_mod
 from bhanu import news as news_mod
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -74,6 +76,7 @@ def _page(lang: str, title: str, body: str) -> str:
         f'<a href="/sizing?lang={lang}">{t("sizing")}</a> | '
         f'<a href="/paper?lang={lang}">{t("paper_trading")}</a> | '
         f'<a href="/skills?lang={lang}">{t("skills")}</a> | '
+        f'<a href="/timemachine?lang={lang}">{t("timemachine")}</a> | '
         f'<a href="?lang=en">EN</a> <a href="?lang=hi">HI</a>'
     )
     return f"""<!DOCTYPE html>
@@ -128,18 +131,44 @@ def home(lang: str) -> str:
         paper_html = f"<p>{t('paper_trading')}: unavailable ({_esc(exc)})</p>"
     try:
         news = _cached("news:NIFTY", 300, lambda: news_mod.check_symbol("NIFTY"))
-        items = news.get("items", [])[:5]
-        if items:
+        # "latest" = most recent fetched headlines (bot checked, shown
+        # automatically); "items" = only the new/unseen ones. Showing
+        # "latest" keeps headlines visible on every load — the bot checks,
+        # the user never has to.
+        latest = news.get("latest", [])[:5]
+        fresh = news.get("items", []) or []
+        sources = news.get("sources", {}) or {}
+        source_line = (
+            f"Bot ne abhi check kiya — NSE announcements: "
+            f"{sources.get('nse_announcements', 'unavailable')}; "
+            f"Yahoo headlines: {sources.get('yahoo_headlines', 'unavailable')}."
+        )
+        if latest:
             lis = "".join(
                 f"<li>{_esc(it.get('title', ''))} "
-                f"[{', '.join(it.get('tags', []))}]</li>"
-                for it in items
+                f"[{_esc(it.get('source', ''))}"
+                + (f", {', '.join(it.get('tags', []))}" if it.get("tags") else "")
+                + "]</li>"
+                for it in latest
             )
-            news_html = f"<h3>{t('news')}</h3><ul>{lis}</ul>"
+            fresh_line = (
+                f"<p>{len(fresh)} fresh item(s) since last check "
+                f"(moving &ge;3%: {news.get('moving')}).</p>"
+                if fresh
+                else f"<p>No new items since last check (moving &ge;3%: {news.get('moving')}).</p>"
+            )
+            news_html = (
+                f"<h3>{t('news')}</h3><p class='muted'>{_esc(source_line)}</p>"
+                f"<ul>{lis}</ul>{fresh_line}"
+            )
         else:
-            news_html = f"<h3>{t('news')}</h3><p>No fresh items (moving: {news.get('moving')}).</p>"
+            news_html = (
+                f"<h3>{t('news')}</h3><p class='muted'>{_esc(source_line)}</p>"
+                f"<p>News unavailable right now — no headlines returned "
+                f"(moving &ge;3%: {news.get('moving')}).</p>"
+            )
     except Exception as exc:  # noqa: BLE001
-        news_html = f"<h3>{t('news')}</h3><p>unavailable ({_esc(exc)})</p>"
+        news_html = f"<h3>{t('news')}</h3><p>News unavailable ({_esc(exc)})</p>"
     body = (
         f"<table><tr><th>Index</th><th>Price</th><th>Change</th><th></th></tr>{rows}</table>"
         f"{paper_html}{news_html}"
@@ -270,6 +299,121 @@ def skills_page(lang: str) -> str:
         f"<th>Shows on</th><th>Live status</th></tr>{body_rows}</table>{note}"
     )
     return _page(lang, t("skills"), body)
+
+
+def timemachine_page(lang: str) -> str:
+    t = lambda k: i18n_mod.t(k, lang)
+    try:
+        # Monte Carlo (10,000 replays) + backtest are cached 10 min:
+        # the backtest refetches 1 month of 5m bars, so it is slow.
+        data = _cached("timemachine", 600, timecheck_mod.collect_timemachine)
+    except Exception as exc:  # noqa: BLE001
+        return _page(lang, t("timemachine"), f"<p>time machine unavailable: {_esc(exc)}</p>")
+
+    def _fmt(value) -> str:
+        return f"{value:,.2f}" if value is not None else "—"
+
+    setup = data.get("setup")
+    setup_html = ""
+    if setup:
+        setup_html = (
+            f"<h3>Today's best ORB setup</h3>"
+            f"<p>{_esc(setup.get('symbol', ''))} {_esc(setup.get('signal', ''))} — "
+            f"entry {_fmt(setup.get('entry'))}, stop {_fmt(setup.get('stop'))}"
+            + (f" (1.5x ATR {_fmt(setup.get('atr_stop'))})" if setup.get("atr_stop") else "")
+            + f", target {_fmt(setup.get('target'))}, "
+            f"range {_fmt(setup.get('orb_low'))}–{_fmt(setup.get('orb_high'))}, "
+            f"price now {_fmt(setup.get('price'))}.</p>"
+        )
+    else:
+        setup_html = f"<h3>Today's best ORB setup</h3><p>{_esc(data.get('setup_error', 'no setup'))}</p>"
+
+    mc = data.get("monte_carlo", {})
+    if mc.get("available"):
+        mc_html = (
+            f"<h3>Monte Carlo Time Machine — {mc['n']:,} replays</h3>"
+            f"<p>{_esc(mc.get('symbol', ''))} {_esc(mc.get('direction', ''))} "
+            f"entry {_fmt(mc.get('entry'))}, stop {_fmt(mc.get('stop'))}, "
+            f"target {_fmt(mc.get('target'))}.</p>"
+            f"<table><tr><th>Outcome</th><th>Share</th></tr>"
+            f"<tr><td>Target first (win)</td><td>{mc['target_first_pct']:.1f}%</td></tr>"
+            f"<tr><td>Stop first (loss)</td><td>{mc['stop_first_pct']:.1f}%</td></tr>"
+            f"<tr><td>Neither (flat by 15:15)</td><td>{mc['neither_pct']:.1f}%</td></tr></table>"
+            f"<p>Average outcome: {mc['avg_r']:+.2f}R. Best case (target hit): "
+            f"+{mc['best_case_r']:.1f}R. Worst case (stop hit): {mc['worst_case_r']:.1f}R. "
+            f"Verdict: {mc['verdict']} (break-even {mc['break_even_pct']:.1f}% "
+            f"target-first among decisive replays). "
+            f"Reality check only — resampled bars cannot see the future, and "
+            f"fees/slippage are ignored.</p>"
+        )
+    else:
+        mc_html = (
+            f"<h3>Monte Carlo Time Machine</h3>"
+            f"<p>Unavailable — {_esc(mc.get('reason', 'no data'))}</p>"
+        )
+
+    tc = data.get("trade_check", {})
+    if tc.get("available"):
+        lim = tc["limits"]
+        tc_html = (
+            f"<h3>Trade check — {tc['symbol']} {tc['direction']}</h3>"
+            f"<p>Risk gate: <b>{tc['gate_verdict']}</b>"
+            + (f" — {_esc(tc['gate_reason'])}" if tc.get("gate_reason") and tc["gate_reason"] != "ok" else "")
+            + f". Sizing: {tc['sizing_verdict']} — {_esc(tc['sizing_reason'])}.</p>"
+            f"<table><tr><th>Four limits (max units)</th><th>Units</th></tr>"
+            f"<tr><td>Max loss/trade (₹500 / risk per unit)</td><td>{lim['max_loss']}</td></tr>"
+            f"<tr><td>Position cap (75% of budget / entry)</td><td>{lim['position_cap']}</td></tr>"
+            f"<tr><td>Max order (₹80,000 / entry)</td><td>{lim['max_order']}</td></tr>"
+            f"<tr><td>Cash buffer (90% of budget / entry)</td><td>{lim['cash_buffer']}</td></tr>"
+            f"<tr><td><b>Binding limit → qty</b></td><td><b>{tc['qty']}</b> ({_esc(tc.get('binding_limit', ''))})</td></tr></table>"
+            f"<p>Entry {_fmt(tc.get('entry'))}, stop {_fmt(tc.get('stop'))}, "
+            f"target {_fmt(tc.get('target'))}, R:R {tc['rr']:.2f}. "
+            f"Position value ₹{tc['position_value']:,.2f}, max loss at stop "
+            f"₹{tc['max_loss']:,.2f}. Positions: capital allows "
+            f"{tc['positions_by_capital']}, day limit allows "
+            f"{tc['positions_by_day']}/day — max {tc['positions_max']} such "
+            f"position(s) (budget ₹{tc['budget']:,.0f}).</p>"
+        )
+    else:
+        tc_html = (
+            f"<h3>Trade check</h3>"
+            f"<p>Unavailable — {_esc(tc.get('reason', 'no setup'))}</p>"
+        )
+
+    bt = data.get("backtest", {})
+    bt_rows = ""
+    if bt.get("available"):
+        for direction in ("long", "short"):
+            d = bt["directions"].get(direction, {})
+            if d.get("available"):
+                bt_rows += (
+                    f"<tr><td>ORB {direction}</td><td>{d['fires']}</td>"
+                    f"<td>{d['target_wins']}</td><td>{d['stop_losses']}</td>"
+                    f"<td>{d['neither']}</td><td>{d['avg_r']:+.3f}R</td></tr>"
+                )
+            else:
+                bt_rows += (
+                    f"<tr><td>ORB {direction}</td><td colspan='5'>unavailable — "
+                    f"{_esc(d.get('reason', ''))}</td></tr>"
+                )
+        bt_html = (
+            f"<h3>ORB backtest — NIFTY 5m ({_esc(bt.get('first_day', '?'))} to "
+            f"{_esc(bt.get('last_day', '?'))}, {_esc(bt.get('sessions', '?'))} full sessions)</h3>"
+            f"<table><tr><th>Direction</th><th>Fires</th><th>Target wins</th>"
+            f"<th>Stop losses</th><th>Neither</th><th>Avg R</th></tr>{bt_rows}</table>"
+            f"<p class='muted'>History replay on real bars (range-midpoint stop, "
+            f"2R target, flat 15:15; no fees/slippage). Small sample, and the "
+            f"period was a strong uptrend — do not read this as a general edge. "
+            f"No accuracy percentage is claimed.</p>"
+        )
+    else:
+        bt_html = (
+            f"<h3>ORB backtest</h3>"
+            f"<p>Unavailable — {_esc(bt.get('reason', 'no data'))}</p>"
+        )
+
+    body = setup_html + mc_html + tc_html + bt_html
+    return _page(lang, t("timemachine"), body)
 
 
 def chain_page(lang: str, query: dict) -> str:
@@ -403,6 +547,8 @@ class Handler(BaseHTTPRequestHandler):
                 body = paper_page(lang)
             elif parsed.path == "/skills":
                 body = skills_page(lang)
+            elif parsed.path == "/timemachine":
+                body = timemachine_page(lang)
             else:
                 body = _page(lang, "Not found", "<p>Unknown page.</p>")
                 self._send(body, 404)

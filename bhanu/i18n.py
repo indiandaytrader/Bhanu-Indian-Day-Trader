@@ -49,6 +49,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "Skills",
         "hi": "Skills",
     },
+    "timemachine": {
+        "en": "Time Machine",
+        "hi": "Time Machine",
+    },
     "entry": {
         "en": "Entry",
         "hi": "Entry",

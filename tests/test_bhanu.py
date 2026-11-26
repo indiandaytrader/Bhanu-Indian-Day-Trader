@@ -427,6 +427,36 @@ class TestNews(unittest.TestCase):
         self.assertEqual(len(second["items"]), 0)
         self.assertEqual(len(second["latest"]), 2)
 
+    def test_yahoo_search_fallback_when_rss_empty(self):
+        # The per-symbol RSS channel is often empty for Indian symbols;
+        # fetch_yahoo_headlines must then fall back to the search API.
+        import json as _json
+        from unittest.mock import patch
+        rss_empty = (
+            b'<?xml version="1.0"?><rss version="2.0">'
+            b"<channel><title>x</title></channel></rss>"
+        )
+        search_payload = _json.dumps({"news": [
+            {"title": "Nifty rallies on FII buying",
+             "link": "https://example.com/1",
+             "providerPublishTime": 1795432080, "publisher": "Test"},
+            {"title": "RBI keeps repo rate unchanged",
+             "link": "https://example.com/2",
+             "providerPublishTime": 1795430000, "publisher": "Test"},
+        ]}).encode("utf-8")
+
+        def fake_get(url, headers=None):
+            if "rss/headline" in url:
+                return rss_empty
+            return search_payload
+
+        with patch.object(news_mod, "_http_get", side_effect=fake_get):
+            items, note = news_mod.fetch_yahoo_headlines("NIFTY")
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["title"], "Nifty rallies on FII buying")
+        self.assertEqual(items[0]["source"], "Yahoo headline")
+        self.assertEqual(note, "")
+
 
 class TestTimecheck(unittest.TestCase):
     def test_trade_check_offline(self):
@@ -467,6 +497,57 @@ class TestTimecheck(unittest.TestCase):
         }):
             result = timecheck_mod.best_orb_setup()
         self.assertIn("error", result)
+
+
+class TestDashboardNews(unittest.TestCase):
+    """Home page shows headlines AUTOMATICALLY (bot checked) — no manual check."""
+
+    def _mock_news(self):
+        return {
+            "symbol": "NIFTY",
+            "moving": False,
+            "change_pct": 0.39,
+            "tags": [],
+            "items": [{
+                "source": "Yahoo headline", "title": "Nifty rallies on FII buying",
+                "link": "https://example.com/1", "published": "26 Nov 2026",
+                "tags": [],
+            }],
+            "latest": [
+                {"source": "Yahoo headline", "title": "Nifty rallies on FII buying",
+                 "link": "https://example.com/1", "published": "26 Nov 2026", "tags": []},
+                {"source": "Yahoo headline", "title": "RBI keeps repo rate unchanged",
+                 "link": "https://example.com/2", "published": "26 Nov 2026", "tags": []},
+            ],
+            "sources": {
+                "nse_announcements": "NSE announcements unavailable: HTTP Error 403: Forbidden",
+                "bse_announcements": "BSE announcements need a BSE scrip code",
+                "yahoo_headlines": "5 item(s)",
+            },
+            "quote_error": "",
+        }
+
+    def test_home_shows_latest_headlines_automatically(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        app_mod._cache.clear()
+        with patch.object(news_mod, "check_symbol", return_value=self._mock_news()):
+            html = app_mod.home("hi")
+        # Headlines are visible without the user doing anything.
+        self.assertIn("Nifty rallies on FII buying", html)
+        self.assertIn("RBI keeps repo rate unchanged", html)
+        # Bot language, and the blocked NSE source is stated honestly.
+        self.assertIn("Bot ne abhi check kiya", html)
+        self.assertIn("NSE announcements unavailable", html)
+
+    def test_home_news_failure_is_honest(self):
+        from unittest.mock import patch
+        from web import app as app_mod
+        app_mod._cache.clear()
+        with patch.object(news_mod, "check_symbol", side_effect=RuntimeError("network down")):
+            html = app_mod.home("hi")
+        self.assertIn("News unavailable", html)
+        self.assertNotIn("Nifty rallies", html)
 
 
 if __name__ == "__main__":

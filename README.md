@@ -11,7 +11,7 @@ DayTrader (US) batata hai America ke market me kab ghusna hai aur kab nikalna ha
 - **Entry / Exit signals** — range-midpoint ya 1.5x ATR stop, 2R target, 15:15 IST tak flat
 - **Position Sizing Calculator** — chaar limits se size nikalta hai; stop door ho to NO trade
 - **Monte Carlo Time Machine** — trade ko 10,000 baar replay karke honest odds batata hai (backtest, guarantee nahi)
-- **News Tracker** — NSE/BSE announcements aur India ki taaza headlines, trade se pehle news check karo; news ke baad hi trade karo
+- **News Tracker** — bot khud NSE/BSE announcements aur India ki taaza headlines check karke dashboard par dikhata hai; tumko manually news dekhne ki zaroorat nahi — news ke baad hi trade karo
 - **Live Support / Resistance** — Nifty / Bank Nifty / Sensex ke live support-resistance levels, PDH/PDL aur ORB range ke saath — kahan se entry, kahan se exit, sab ek jagah
 - **Hinglish interface** — Hindi me samjho, English me trade karo
 - **Paper trading by default** — pehle paper par seekho; is repo se koi real order kabhi nahi lagta
@@ -29,6 +29,7 @@ Ye ek free, open-source dashboard hai Indian market ke liye. Isme hai:
 - **Entry / Exit rules** — range midpoint ya 1.5x ATR stop, 2R target, 15:15 IST tak flat
 - **Position Sizing Calculator** — chaar limits se size nikalta hai, aur stop door ho to mana kar deta hai
 - **Monte Carlo Time Machine** — trade ko 10,000 baar replay karke honest odds batata hai (backtest, guarantee nahi)
+- **News Tracker** — bot khud NSE/BSE announcements aur India ki taaza headlines check karke dashboard par dikhata hai; tumko manually news dekhne ki zaroorat nahi — news ke baad hi trade karo
 - **Paper Trading** — pehle paper par, real money kabhi nahi (is repo se koi real order nahi lagta)
 
 ## DayTrader se kya alag hai?
@@ -95,7 +96,16 @@ Then open http://localhost:8810.
 .venv/bin/python -m bhanu.options chain      # Nifty option chain with OI + PCR
 .venv/bin/python -m bhanu.sizing --help      # position sizing calculator
 .venv/bin/python -m bhanu.timemachine --help # Monte Carlo + history replay
+.venv/bin/python -m bhanu.levels             # live support/resistance + ORB entry/exit
+.venv/bin/python -m bhanu.skills             # all 11 skills — live status
+.venv/bin/python -m bhanu.timecheck          # time machine + trade check + backtest
 ```
+
+## Dashboard pages
+
+- **/levels — Live Support / Resistance** — Nifty / Bank Nifty / Sensex ke live levels: nearest support/resistance (recent swing highs/lows, PDH/PDL aur ORB range se), ORB entry, SL (range midpoint + 1.5x ATR), TP (2R) aur signal — kahan se entry, kahan se exit, sab ek jagah. Levels Yahoo 5m bars se aate hain (public, delayed, proxy) — live platform par verify karo. NSE option chain aksar blocked rehta hai (HTTP 403); chain data kabhi fake nahi kiya jata.
+- **/skills — All 11 skills, ek jagah** — har DayTrader skill: kya karta hai, kahan dikhta hai, aur uska LIVE status abhi (ORB hits, taaze news headlines, entry/SL/TP, Monte Carlo summary, risk gate, paper trades, alerts, NSE filings). trader-budget sizing me folded hai, trader-pelosi skipped hai — dono saaf likhe hain, chhupaye nahi.
+- **/timemachine — Time Machine + Trade Check + Backtest** — aaj ke best ORB setup ko 10,000 baar replay karke win rate / avg R / best case / worst case; usi setup par risk gate (PASS/BLOCK), chaar limits se position size, kitni positions ban sakti hain, SL/TP aur R:R; aur NIFTY ORB backtest (fires, wins, losses, avg R). Koi accuracy % claim nahi — Monte Carlo reality check hai, edge ka proof nahi.
 
 ## Rules (the short version)
 
