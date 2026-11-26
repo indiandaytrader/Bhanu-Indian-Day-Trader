@@ -1,3 +1,4 @@
+# web/app.py
 """Bhanu Indian Day Trader — web dashboard.
 
 Stdlib-only HTTP server (no framework). Pages:
@@ -69,6 +70,9 @@ from bhanu import config as config_mod
 from bhanu import data as data_mod
 from bhanu import i18n as i18n_mod
 from bhanu import levels as levels_mod
+from bhanu import range_replay
+from web.detail_jobs import DetailJobs
+from bhanu import greeks
 from bhanu import options as options_mod
 from bhanu import paper as paper_mod
 from bhanu import scanner as scanner_mod
@@ -90,6 +94,8 @@ PORT = int(os.environ.get("PORT", "8810"))
 #: reload. Server-side caches are 30–600s, so a tick usually returns
 #: fresh-enough data without hammering Yahoo/NSE.
 LIVE_REFRESH_MS = 60_000
+
+_detail_jobs = DetailJobs()
 
 _cache: dict[str, tuple[float, object]] = {}
 
@@ -187,7 +193,7 @@ def _page(lang: str, title: str, body: str, head_extra: str = "", scripts: str =
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(title)} — Bhanu Indian Day Trader</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
 :root{{--bg:#edf0f3;--card:#ffffff;--text:#141a26;--muted:#6b7385;--border:#d9dee6;
 --accent:#2563eb;--up:#2f9e5f;--down:#d6455d;--upbg:#e7f5ec;--downbg:#fbe9ec;
@@ -314,17 +320,24 @@ a.icard{{display:block}}
 .tpanel .chk{{display:flex;flex-direction:column;gap:1px;margin:3px 0;font-size:11px}}
 .foot{{color:var(--muted);font-size:10.5px;text-align:center;padding:0 0 14px}}
 .divider{{height:1px;background:#d9dee6;margin:8px 0 6px}}
-</style>{head_extra}</head>
-<body><div id="ml-disc"><b>Paper trading only · not investment advice.</b> Everything on this page is computed on your own computer from public data. Patterns and backtests are not recommendations. You are responsible for your own trades.</div>
-<div class='ml-top'><h1>Bhanu Indian Day Trader</h1><span class='sp'></span><span class='pill'><span class='dot'></span>LIVE</span><button class="theme-btn" onclick="bhanuTheme()">🌙 / ☀️</button></div>
-{nav}
-<h2>{_esc(title)}</h2>{live_html}{body}
+</style><link rel="stylesheet" href="/static/terminal.css">{head_extra}</head>
+<body><div id="ml-disc"><b>Paper trading only · not investment advice.</b> Market feeds may be delayed.</div>
+<div class='ml-top'><h1>Bhanu Indian Day Trader</h1><span class='sp'></span><time class='session-clock' id='session-clock'></time><span class='paper-mode'>Paper terminal</span><button aria-label='Toggle light or dark theme' class="theme-btn" onclick="bhanuTheme()">Theme</button></div>
+<div class='nav-strip'>{nav}</div>
+<main><h2>{_esc(title)}</h2>{live_html}{body}</main>
 <p class="foot">Paper trading only — no real orders. Educational software, not investment advice.</p>
 <script>
+const marketClock=new Intl.DateTimeFormat('en-GB',{{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit'}});
+function paintClock(){{document.getElementById('session-clock').textContent=marketClock.format(new Date())+' IST';}}
+paintClock();setInterval(paintClock,1000);
+document.querySelectorAll('.lang a').forEach(a=>{{
+  const u=new URL(location.href);u.searchParams.set('lang',new URL(a.href).searchParams.get('lang'));a.href=u.href;
+}});
 function bhanuTheme(){{
   var h=document.documentElement;
   var next=h.getAttribute('data-theme')==='dark'?'light':'dark';
   h.setAttribute('data-theme',next);
+  if(window.bhanuChartOpts){{const o=bhanuChartOpts();for(const st of [...Object.values(window.bhanuLines||{{}}),...Object.values(window.bhanuCandles||{{}})]){{if(st.chart)st.chart.applyOptions({{layout:o.layout,grid:o.grid}});}}}}
   try{{localStorage.setItem('bhanu-theme',next);}}catch(e){{}}
 }}
 try{{var s=localStorage.getItem('bhanu-theme');
@@ -346,11 +359,12 @@ def _static_file(name: str) -> tuple[bytes, str] | None:
     Returns ``(bytes, content_type)`` or ``None`` when the name is not
     an allowed static file or the file is missing.
     """
-    if name != CHART_LOCAL:
+    if name not in (CHART_LOCAL, "terminal.css"):
         return None
     path = ROOT / "web" / "static" / name
     try:
-        return path.read_bytes(), "application/javascript; charset=utf-8"
+        mime = "text/css" if name.endswith(".css") else "application/javascript"
+        return path.read_bytes(), mime + "; charset=utf-8"
     except OSError:
         return None
 
@@ -391,7 +405,7 @@ function bhanuLiveClock(){
   if(!el){return;}
   if(!el.getAttribute('data-last')){return;}
   if(el.getAttribute('data-failed')==='1'){return;}
-  el.innerHTML='<span class="dot"></span> LIVE · '+bhanuLiveTime()+' · data '+el.getAttribute('data-last');
+  el.innerHTML='<span class="dot"></span> Dashboard · '+bhanuLiveTime()+' · data received '+el.getAttribute('data-last');
 }
 function bhanuLiveSet(state){
   var el=document.getElementById('bhanu-live-indicator');
@@ -473,7 +487,8 @@ function bhanuChartOpts(h){
     timeScale:{timeVisible:true,secondsVisible:false}};
 }
 function bhanuUnavailable(el,why){
-  el.innerHTML='<p class="muted">Chart unavailable — '+why+'</p>';
+  var message=document.createElement('p');message.className='empty-state';
+  message.textContent='Chart unavailable — '+why;el.replaceChildren(message);
 }
 function bhanuSvgLine(el, points, color){
   if(!points||!points.length){bhanuUnavailable(el,'no price data');return;}
@@ -651,6 +666,15 @@ function bhanuSparkFor(symbol, line){
   var id=map[symbol];if(!id){return;}
   try{bhanuSpark(id,line);}catch(e){}
 }
+async function bhanuDetail(url){
+  const deadline=Date.now()+180000;
+  while(Date.now()<deadline){
+    const response=await fetch(url,{headers:{Prefer:'respond-async'},cache:'no-store'});
+    if(response.status!==202)return response;
+    await new Promise(resolve=>setTimeout(resolve,1200));
+  }
+  throw Error('Detail feed timed out');
+}
 function bhanuFetchJson(url, timeoutMs){
   // fetch() with a timeout: a hung request must surface as an error
   // (so the retry loop runs) instead of leaving "loading" forever.
@@ -670,6 +694,25 @@ function bhanuFetchJson(url, timeoutMs){
     throw e;
   });
 }
+function bhanuTickLabel(el){
+  const stamp=Number(el.dataset.tick);
+  if(!stamp){el.textContent='2 s poll · source time unavailable';return;}
+  const age=Date.now()/1000-stamp;
+  const date=new Date(stamp*1000);
+  const formatted=date.toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false,timeZone:'Asia/Kolkata'});
+  el.textContent='2 s poll · '+(age>=0&&age<120?'Recent tick':'Last known tick')+' · '+formatted+' IST';
+}
+function bhanuFeedStatus(){
+  document.querySelectorAll('[data-tick]').forEach(bhanuTickLabel);
+  const badge=document.getElementById('index-feed-state');
+  if(!badge)return;
+  const allRecent=['chart-nifty-stamp','chart-bank-stamp'].every(id=>{
+    const el=document.getElementById(id),age=el?Date.now()/1000-Number(el.dataset.tick):Infinity;
+    return age>=0&&age<120;
+  });
+  badge.textContent=allRecent?badge.dataset.recent:'NSE indices · waiting for recent ticks';
+}
+bhanuFeedStatus();setInterval(bhanuFeedStatus,2000);
 function bhanuLiveLineTick(id, symbol){
   // One live tick: fetch the latest price and glide the line's end
   // to it in place (bhanuAnimLast) — never a full re-fetch, never a
@@ -679,6 +722,8 @@ function bhanuLiveLineTick(id, symbol){
   return bhanuFetchJson('/api/live?symbol='+encodeURIComponent(symbol)).then(function(p){
     if(!p||p.error||p.ltp===null||p.ltp===undefined){throw new Error(p&&p.error?p.error:'no live data');}
     var t=p.time||0, v=Number(p.ltp);
+    var stamp=document.getElementById(id+'-stamp');
+    if(stamp){stamp.dataset.tick=t;bhanuTickLabel(stamp);}
     var from=st.lastValue;
     if(from===undefined||from===null){
       var line0=st.line||[];
@@ -729,6 +774,8 @@ function bhanuStartLiveLine(id, symbol){
 function bhanuLineRender(id, p, symbol){
   var el=document.getElementById(id);if(!el)return;
   if(!p||!p.line||p.line.length===0){bhanuUnavailable(el,p&&p.error?p.error:'no price data');return;}
+  const cacheNote=document.getElementById(id+'-cache-note');
+  if(cacheNote)cacheNote.textContent=p.stale?'Stale bars · cache saved '+(p.as_of||'time unavailable'):'';
   var lastTime=p.line[p.line.length-1].time;
   var lastVal=p.line[p.line.length-1].value;
   bhanuSparkFor(symbol,p.line);
@@ -746,7 +793,7 @@ function bhanuLineRender(id, p, symbol){
   var s=ch.addLineSeries({color:p.color||'#2563eb',lineWidth:2});
   s.setData(p.line);ch.timeScale().fitContent();
   window.addEventListener('resize',function(){ch.applyOptions({width:el.clientWidth||900});});
-  window.bhanuLines[id]={el:el,series:s,line:p.line.slice(),lastTime:lastTime,lastValue:lastVal,color:p.color||'#2563eb'};
+  window.bhanuLines[id]={el:el,chart:ch,series:s,line:p.line.slice(),lastTime:lastTime,lastValue:lastVal,color:p.color||'#2563eb'};
   bhanuStartLiveLine(id,symbol);
 }
 function bhanuLineChart(id, symbol){
@@ -917,6 +964,27 @@ function bhanuCandleLayout(st){
     b.el.style.top=Math.min(y1,y2)+'px';b.el.style.height=Math.max(0,Math.abs(y2-y1))+'px';
   });
 }
+function bhanuIndicators(id,st){
+  const p=st.payload, candles=p.candles;
+  const ema=[];
+  if(candles.length>=20){
+    let value=candles.slice(0,20).reduce((sum,c)=>sum+c.close,0)/20;
+    ema.push({time:candles[19].time,value:value});
+    for(const c of candles.slice(20)){value+=(2/21)*(c.close-value);ema.push({time:c.time,value:value});}
+  }
+  const vol=p.volume||[];
+  if(!st.ema)st.ema=st.chart.addLineSeries({color:'#c18013',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
+  st.ema.setData(ema);st.ema.applyOptions({visible:st.overlays.ema!==false});
+  if(!st.hist){
+    st.hist=st.chart.addHistogramSeries({priceScaleId:'volume',priceFormat:{type:'volume'},color:'#5793ad',priceLineVisible:false,lastValueVisible:false});
+    st.hist.priceScale().applyOptions({scaleMargins:{top:0.82,bottom:0}});
+  }
+  st.hist.setData(vol);st.hist.applyOptions({visible:st.overlays.volume!==false});
+  const label=document.getElementById(id+'-indicators');
+  const last=candles[candles.length-1];
+  const barTime=new Date(last.time*1000).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',hour12:false});
+  if(label)label.textContent=['Last bar '+barTime+' IST',ema.length?'EMA 20':'EMA 20 needs 20 bars',p.vwap&&p.vwap.length?'VWAP':'VWAP unavailable',vol.length?'Reported volume':'Volume unavailable'].join(' · ');
+}
 function bhanuCandleApplyOverlays(id){
   // Rebuild every overlay from st.payload + st.overlays (the toggle
   // state). Price lines are never toggled — entry/SL/TP/levels always
@@ -925,6 +993,7 @@ function bhanuCandleApplyOverlays(id){
   // sit close enough to overlap, e.g. PDL vs TP).
   var st=(window.bhanuCandles||{})[id];
   if(!st||!st.payload){return;}
+  bhanuIndicators(id,st);
   var p=st.payload, ov=st.overlays||{};
   var show=function(k){return ov[k]!==false;};
   (st.priceLines||[]).forEach(function(h){try{st.series.removePriceLine(h);}catch(e){}});
@@ -960,12 +1029,15 @@ function bhanuToggleOverlay(chartId, key, btn){
 function bhanuStockLoad(symbol, interval){
   var iv=interval||'5m';
   var host=document.getElementById('stock-body');if(!host){return;}
+  const request=Symbol();host.activeRequest=request;
   document.querySelectorAll('#stock-tf .tfbtn').forEach(function(b){
     b.classList.toggle('on',b.dataset.iv===iv);
   });
-  fetch('/api/stock?symbol='+encodeURIComponent(symbol)+'&interval='+encodeURIComponent(iv)).then(function(r){
+  host.stockUrl='/api/stock?symbol='+encodeURIComponent(symbol)+'&interval='+encodeURIComponent(iv);
+  bhanuDetail(host.stockUrl).then(function(r){
     if(!r.ok){throw new Error('stock '+r.status);}return r.json();
   }).then(function(d){
+    if(host.activeRequest!==request)return;
     if(!d||d.error){throw new Error(d&&d.error?d.error:'no stock data');}
     var hd=document.getElementById('stock-head');
     if(hd){hd.innerHTML=d.header_html||'<p class="muted">Header unavailable.</p>';}
@@ -977,21 +1049,46 @@ function bhanuStockLoad(symbol, interval){
     document.querySelectorAll('#stock-pills .opill').forEach(function(b){
       var k=b.dataset.ov;
       var avail=ov[k]!==false;
+      if(k==='volume')avail=Boolean(d.chart&&d.chart.volume&&d.chart.volume.length);
+      if(k==='ema')avail=Boolean(d.chart&&d.chart.candles&&d.chart.candles.length>=20);
       b.disabled=!avail;
       if(!avail){b.classList.remove('on');}
       else{b.classList.add('on');}
     });
     var st=(window.bhanuCandles||{})['stock-chart'];
-    if(st&&st.chart){try{st.chart.remove();}catch(e){} delete window.bhanuCandles['stock-chart'];}
+    if(st&&st.chart){window.removeEventListener('resize',st.onResize);st.boxes.forEach(b=>b.el.remove());try{st.chart.remove();}catch(e){} delete window.bhanuCandles['stock-chart'];}
     var el=document.getElementById('stock-chart');
     if(el){el.innerHTML='';}
     if(d.chart&&d.chart.candles&&d.chart.candles.length){
       bhanuCandleRender('stock-chart',d.chart,null);
+      if(!host.refreshRegistered){
+        host.refreshRegistered=true;
+        window.bhanuRefreshers.push(async function(){
+          const active=host.activeRequest;
+          try{
+            const response=await bhanuDetail(host.stockUrl);
+            const fresh=await response.json();
+            if(active!==host.activeRequest)return;
+            if(!response.ok||fresh.error||!fresh.chart||fresh.chart.error)
+              throw Error(fresh.error||(fresh.chart&&fresh.chart.error)||'Chart unavailable');
+            if(window.bhanuCandles['stock-chart'])bhanuCandleUpdate('stock-chart',fresh.chart);
+            if(fresh.header_html)hd.innerHTML=fresh.header_html;
+            if(fresh.setup_html)sc.innerHTML=fresh.setup_html;
+          }catch(error){
+            if(active===host.activeRequest){
+              const legend=document.getElementById('stock-chart-indicators');
+              if(legend)legend.textContent='Refresh unavailable · last received chart · '+error.message;
+            }
+            throw error;
+          }
+        });
+      }
     }else if(el){
       bhanuUnavailable(el,d.chart&&d.chart.error?d.chart.error:'no chart data');
     }
     if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
   }).catch(function(e){
+    if(host.activeRequest!==request)return;
     host.innerHTML='<p class="muted">Stock data load nahi ho paya — page refresh karein.</p>';
   });
 }
@@ -1011,9 +1108,11 @@ function bhanuCandleRender(id, p, refreshUrl){
   if(!p||!p.candles||p.candles.length===0){bhanuUnavailable(el,p&&p.error?p.error:'no price data');return;}
   if(typeof LightweightCharts==='undefined'){
     bhanuSvgCandles(el,p.candles);
+    var legend=document.getElementById(id+'-indicators');
+    if(legend)legend.textContent='Basic candle view · interactive indicators unavailable';
     if(refreshUrl){
       window.bhanuRefreshers.push(function(){
-        return fetch(refreshUrl).then(function(r){
+        return bhanuDetail(refreshUrl).then(function(r){
           if(!r.ok){throw new Error('candles '+r.status);}return r.json();
         }).then(function(p2){
           if(!p2||p2.error||!p2.candles||!p2.candles.length){throw new Error(p2&&p2.error?p2.error:'no candle data');}
@@ -1034,17 +1133,18 @@ function bhanuCandleRender(id, p, refreshUrl){
     vw.setData(p.vwap);
   }
   var st={chart:ch,series:cs,vwap:vw,priceLines:[],boxes:[],wrap:wrap,el:el,payload:p,
-    overlays:{orderblock:true,fvg:true,structure:true,liquidity:false,vwap:true,trades:true}};
+    overlays:{orderblock:true,fvg:true,structure:true,liquidity:false,vwap:true,ema:true,volume:true,trades:true}};
   window.bhanuCandles[id]=st;
   st.boxes=bhanuCandleBoxes(wrap,p.boxes||[]);
   bhanuCandleApplyOverlays(id);
   function layout(){bhanuCandleLayout(st);}
   ch.timeScale().subscribeVisibleTimeRangeChange(layout);
   ch.timeScale().subscribeVisibleLogicalRangeChange(layout);
-  window.addEventListener('resize',function(){ch.applyOptions({width:el.clientWidth||900});layout();});
+  st.onResize=function(){ch.applyOptions({width:el.clientWidth||900});layout();};
+  window.addEventListener('resize',st.onResize);
   if(refreshUrl){
     window.bhanuRefreshers.push(function(){
-      return fetch(refreshUrl).then(function(r){
+      return bhanuDetail(refreshUrl).then(function(r){
         if(!r.ok){throw new Error('candles '+r.status);}return r.json();
       }).then(function(p2){bhanuCandleUpdate(id,p2);});
     });
@@ -1061,7 +1161,7 @@ function bhanuLazyCandle(id, url){
   var el=document.getElementById(id);if(!el)return;
   if(el.dataset.bhanuLoaded==='1'){return;}
   el.innerHTML='<p class="loading">Chart load ho raha hai…</p>';
-  fetch(url).then(function(r){
+  bhanuDetail(url).then(function(r){
     if(!r.ok){throw new Error('candles '+r.status);}return r.json();
   }).then(function(p){
     if(!p||p.error||!p.candles||!p.candles.length){throw new Error(p&&p.error?p.error:'no price data');}
@@ -1087,11 +1187,20 @@ function bhanuQuoteFetch(){
   }).then(function(p){
     if(!p||!p.quotes||!p.quotes.length){throw new Error('no quote data');}
     p.quotes.forEach(function(q){
-      if(q.price===null||q.price===undefined){return;}
       var slug=String(q.symbol).replace(/[^A-Za-z0-9]/g,'').toLowerCase();
       var pe=document.getElementById('q-'+slug+'-price');
       var ce=document.getElementById('q-'+slug+'-chg');
       var ve=document.getElementById('q-'+slug+'-prev');
+      const state=document.getElementById('q-'+slug+'-status');
+      if(state)state.textContent=q.error||'Last reported · source time unverified';
+      if(q.price===null||q.price===undefined){
+        if(pe)pe.textContent='data unavailable';
+        if(ce)ce.textContent='—';
+        if(ve)ve.textContent='prev close —';
+        return;
+      }
+      if(ce&&q.change_pct==null)ce.textContent='—';
+      if(ve&&q.prev_close==null)ve.textContent='prev close —';
       if(pe){pe.textContent=Number(q.price).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}
       if(ce&&q.change_pct!==null&&q.change_pct!==undefined){
         ce.textContent=(q.change_pct>=0?'+':'')+Number(q.change_pct).toFixed(2)+'%';
@@ -1102,6 +1211,11 @@ function bhanuQuoteFetch(){
       if(card&&q.change_pct!==null&&q.change_pct!==undefined){card.classList.toggle('neg',q.change_pct<0);}
     });
     if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
+  }).catch(function(error){
+    document.querySelectorAll('.quote-status').forEach(el=>{
+      el.textContent='Refresh unavailable · last received data only';
+    });
+    throw error;
   });
 }
 function bhanuQuoteRefresh(){
@@ -1239,7 +1353,7 @@ function bhanuOrbBreakdown(sym){
   var bd=document.getElementById('orb-breakdown');
   if(!bd||!sym){return;}
   bd.innerHTML='<p class="loading">Signal breakdown load ho raha hai…</p>';
-  fetch('/api/orbbreakdown?symbol='+encodeURIComponent(sym)).then(function(r){
+  bhanuDetail('/api/orbbreakdown?symbol='+encodeURIComponent(sym)).then(function(r){
     if(!r.ok){throw new Error('breakdown '+r.status);}return r.json();
   }).then(function(d){
     if(d&&d.html){bd.innerHTML=d.html;}
@@ -1269,7 +1383,7 @@ function bhanuLevelsBreakdown(sym){
   var bd=document.getElementById('levels-breakdown');
   if(!bd||!sym){return;}
   bd.innerHTML='<p class="loading">Signal breakdown load ho raha hai…</p>';
-  fetch('/api/levelsbreakdown?symbol='+encodeURIComponent(sym)).then(function(r){
+  bhanuDetail('/api/levelsbreakdown?symbol='+encodeURIComponent(sym)).then(function(r){
     if(!r.ok){throw new Error('breakdown '+r.status);}return r.json();
   }).then(function(d){
     if(d&&d.html){bd.innerHTML=d.html;}
@@ -1316,7 +1430,7 @@ function bhanuTmCheckSubmit(ev){
     +'&target='+encodeURIComponent(f.target.value)
     +'&direction='+encodeURIComponent(f.direction.value);
   out.innerHTML='<p class="loading">10,000 replays chal rahe hain…</p>';
-  fetch('/api/timemachine-check?'+q).then(function(r){if(!r.ok){throw new Error('check '+r.status);}return r.json();}).then(function(d){
+  bhanuDetail('/api/timemachine-check?'+q).then(function(r){if(!r.ok){throw new Error('check '+r.status);}return r.json();}).then(function(d){
     if(d&&d.html){out.innerHTML=d.html;}
     else{out.innerHTML='<p class="muted">Check nahi ho paya — '+((d&&d.error)?d.error:'dobara try karein')+'.</p>';}
     if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
@@ -1326,7 +1440,7 @@ function bhanuTmCheckSubmit(ev){
 function bhanuSkillsLoad(){
   var el=document.getElementById('skills-table');
   if(!el){return;}
-  fetch('/api/skills').then(function(r){if(!r.ok){throw new Error('skills '+r.status);}return r.json();}).then(function(d){
+  bhanuDetail('/api/skills').then(function(r){if(!r.ok){throw new Error('skills '+r.status);}return r.json();}).then(function(d){
     if(!d||!d.html){throw new Error(d&&d.error?d.error:'no skills data');}
     el.innerHTML=d.html;
     if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
@@ -1348,8 +1462,11 @@ def _line_chart_block(chart_id: str, label: str, yahoo_symbol: str,
     started and the card sat on "Chart load ho raha hai…" forever
     while the rest of the page worked (that exact bug left the 3 home
     intraday charts blank)."""
+    cached_tick = (poller_mod.get_spark(yahoo_symbol) or {}).get("time") or 0
     return (
         f"<div class='card'><h3>{_esc(label)} — intraday</h3>"
+        f"<p class='feed-stamp' id='{chart_id}-stamp' data-tick='{_esc(cached_tick)}'>2 s poll · source time unavailable</p>"
+        f"<p class='cache-note' id='{chart_id}-cache-note'></p>"
         f"<div id='{chart_id}' class='chart-box' style='height:{height}px'>"
         f"<p class='loading'>Chart load ho raha hai…</p></div></div>"
     )
@@ -1374,7 +1491,7 @@ def _candle_chart_block(chart_id: str, symbol: str, note: str | None = None) -> 
     )
     return (
         f"<div class='card'><h3>{heading}</h3>"
-        f"<p class='muted'>{note_html}</p>"
+        f"<p class='muted'>{note_html}</p><p class='feed-stamp' id='{chart_id}-indicators'>Indicators awaiting candles</p>"
         f"<div id='{chart_id}-wrap' class='chart-wrap'>"
         f"<div id='{chart_id}' class='chart-box tall'>"
         f"<p class='loading'>Chart load ho raha hai…</p></div></div></div>"
@@ -1438,6 +1555,7 @@ def _index_cards_html(lang: str = "hi") -> str:
             f"<a class='icard' id='q-{slug}-card' href='/stock?symbol={name}&lang={lang}'>"
             f"<div class='spark' id='q-{slug}-spark'></div>"
             f"<div class='lab'><b>{_esc(label)}</b></div>"
+            f"<small class='quote-status' id='q-{slug}-status'>Waiting for source data</small>"
             f"<div class='foot'><b id='q-{slug}-price'>loading…</b>"
             f"<span id='q-{slug}-chg'>—</span>"
             f"<span class='muted' id='q-{slug}-prev'>prev close —</span></div></a>"
@@ -1455,6 +1573,8 @@ def _news_feed_html(lang: str, news: dict | None = None) -> str:
     never waits on a fresh fetch.
     """
     t = lambda k: i18n_mod.t(k, lang)
+    if news is None and poller_mod.is_running():
+        return f"<div class='card'><h3>{t('news_feed')}</h3><p class='loading'>News feed warming up…</p></div>"
     if news is None:
         try:
             news = _cached("news:NIFTY", 300, lambda: news_mod.check_symbol("NIFTY"))
@@ -1529,7 +1649,7 @@ def _orb_table_html(result: dict, lang: str, limit: int = 50) -> str:
 
     if not hits:
         return (
-            f"<div class='card'><p>No ORB hits yet today (fetched {result.get('fetched')}, "
+            f"<div class='card'><p class='empty-state'>No ORB hits yet today (fetched {result.get('fetched')}, "
             f"usable {result.get('usable')}, as of {_esc(result.get('as_of', ''))}).</p></div>"
         )
     rows = "".join(_hit_row(h) for h in hits)
@@ -1620,11 +1740,11 @@ def home(lang: str) -> str:
     flow_html = (
         "<div class='card' id='smartmoney'><div class='ml-h'>"
         "<h3>SMART MONEY</h3>"
-        "<span class='sub'>Every F&O stock and NIFTY, BANKNIFTY, SENSEX: "
-        "displacement, structure, zones and liquidity, live</span>"
+        "<span class='sub'>Tracked F&O stocks and indices · "
+        "intraday price change</span>"
         "<span class='sp'></span>"
         "<a href='#sectormap'>Sector Map ↓</a>"
-        "<span class='pill'><span class='dot'></span>LIVE</span></div>"
+        "<span class='pill'>5 min scan</span></div>"
         "<div class='sm-stage'><div class='sm-spaghetti'>"
         "<div class='counts' id='flow-chart-counts' style='display:flex;gap:16px'></div>"
         "<div id='flow-chart' style='height:560px'></div></div>"
@@ -1632,8 +1752,8 @@ def home(lang: str) -> str:
         "<p class='note'>Lines: every F&O stock's move since the open "
         "(green above, red below), NIFTY dashed blue. Waterfall: every "
         "stock now, strongest at the top, weakest at the bottom. "
-        "Prices 2–3 s behind NSE (indices every 2 s, stocks every 30 s; "
-        "SENSEX ~15 min late). A technical screen, not advice.</p>"
+        "Flow refreshes every 5 minutes; upstream data can be delayed. "
+        "A technical screen, not advice.</p>"
         "<p class='muted' id='flow-chart-legend'></p></div>"
     )
     # (c) Sector Map horizon (lazy, same data as the flow).
@@ -1644,7 +1764,7 @@ def home(lang: str) -> str:
         "against NIFTY, with size and momentum</span>"
         "<span class='sp'></span>"
         "<a href='#smartmoney'>Smart money ↑</a>"
-        "<span class='pill'><span class='dot'></span>LIVE · NSE indices</span></div>"
+        "<span class='pill' id='index-feed-state' data-recent='LIVE · NSE indices polling · recent source ticks'>Waiting for source timestamps</span></div>"
         "<div class='hz-wrap'><div id='sector-map'></div>"
         "<div class='hz-side' id='sector-map-list'></div></div>"
         "<p class='muted'><a href='/sectors'>Full sector page</a>.</p></div>"
@@ -1679,7 +1799,7 @@ def home(lang: str) -> str:
         f"{_index_cards_html(lang)}"
         f"{paper_html}"
         f"<p>{t('flat_by')}: 15:15 IST. ORB range 09:15–09:30 IST.</p></div>"
-        f"{chart_cards}{flow_html}{sector_html}{robot_html}{news_html}{orb_html}"
+        f"<div class='index-charts'>{chart_cards}</div>{flow_html}{sector_html}{robot_html}{news_html}{orb_html}"
         f"{levels_mini_html}{tm_mini_html}"
     )
     return _page(
@@ -1875,6 +1995,8 @@ def _orb_scan() -> dict:
             return json.loads(watchlist.read_text())
         except Exception:  # noqa: BLE001 - fall through to a fresh scan
             pass
+    if poller_mod.is_running():
+        raise RuntimeError("ORB scan warming up")
     result = _cached("orb", 120, scanner_mod.scan_orb)
     scanner_mod.write_watchlist(result)
     return result
@@ -2114,7 +2236,7 @@ def stock_page(lang: str, query: dict | None = None) -> str:
         for key, label in (
             ("orderblock", "Order block"), ("fvg", "Fair value gaps"),
             ("structure", "Structure"), ("liquidity", "Liquidity"),
-            ("vwap", "VWAP"), ("trades", "Trades"),
+            ("vwap", "VWAP"), ("ema", "EMA 20"), ("volume", "Volume"), ("trades", "Trades"),
         )
     )
     note = (
@@ -2166,7 +2288,7 @@ def _api_stock(query: dict) -> dict:
         except Exception:  # noqa: BLE001 - price just unavailable
             price = prev_close = change_pct = None
         flow = poller_mod.get_flow()
-        if flow is None:
+        if flow is None and not poller_mod.is_running():
             try:
                 flow = _cached("api:flow", 300, charts_mod.flow_series)
             except Exception:  # noqa: BLE001
@@ -2305,10 +2427,10 @@ def skills_page(lang: str) -> str:
     body = (
         f"<div class='card'><div id='skills-table'>"
         f"<p class='loading'>Skills load ho raha hai…</p></div>{note}</div>"
-        f"{_news_feed_html(lang)}"
+        f"<div id='news-feed'><p class='loading'>{t('news_feed')} · loading…</p></div>"
     )
     return _page(lang, t("skills"), body,
-                 scripts=_chart_js() + "<script>bhanuSkillsLoad();</script>",
+                 scripts=_chart_js() + f"<script>bhanuSkillsLoad();bhanuNewsRefresh('{lang}');</script>",
                  active="skills")
 
 
@@ -2540,54 +2662,140 @@ def timemachine_page(lang: str) -> str:
     )
     body = (
         form
+        + """<section class="card"><h3>Strategy Backtesting Lab</h3><p>Ek underlying ka real 5-minute CSV chunein. Use bar-open ISO timestamps (naive = IST) and columns <code>time,open,high,low,close</code>. Maximum 8 MiB.</p>
+<form id="history-form"><label>5m CSV <input type="file" accept=".csv,text/csv" required></label>
+<label>Strategy <select name="strategy"><option value="orb15">15-minute ORB</option><option value="orb30">30-minute ORB</option><option value="channel">Rolling six-bar breakout</option></select></label>
+<label>From <input type="date" name="start" required></label><label>Through <input type="date" name="end" required></label>
+<label>Units <input type="number" name="qty" value="1" min="1" max="1000000" required></label>
+<label>Brokerage ₹ / order <input type="number" name="fee" min="0" step="any" value="0" required></label>
+<label>Slippage bps / side <input type="number" name="slip" min="0" max="9999" step="any" value="0" required></label>
+<button>Run replay</button></form><p class="note">First breakout close per complete session, midpoint stop, 2R target. Subsequent bars only. Stop first on ambiguous bars. Exit by 15:15 IST. P&amp;L uses underlying units. Taxes excluded.</p><div id="history-result" role="status"></div></section>
+"""
         + "<div id='timemachine-body'>"
         "<p class='loading'>Time Machine load ho raha hai…</p></div>"
     )
     return _page(
         lang, t("timemachine"), body,
-        scripts=_chart_js() + "<script>bhanuTimemachineLoad();</script>", live=True,
+        scripts=_chart_js() + "<script>bhanuTimemachineLoad();</script>" + """<script>
+document.getElementById('history-form').addEventListener('submit',async function(e){
+  e.preventDefault();
+  const out=document.getElementById('history-result'), file=this.querySelector('[type=file]').files[0];
+  const button=this.querySelector('button');
+  out.textContent='Replay chal raha hai…'; button.disabled=true;
+  try{
+    if(file.size>8388608)throw Error('Maximum CSV size is 8 MiB.');
+    const q=new URLSearchParams(new FormData(this));
+    const res=await fetch('/api/history?'+q,{method:'POST',body:file});
+    const data=await res.json();
+    if(data.error)throw Error(data.error);
+    const money=n=>n.toLocaleString('en-IN',{maximumFractionDigits:2});
+    const total=k=>data.trades.reduce((sum,t)=>sum+t[k],0);
+    out.textContent=data.strategy+' · '+data.from+' → '+data.to+' · '+data.complete+' complete sessions · '+data.skipped+' incomplete skipped · '+data.trades.length+' trades · Gross ₹'+money(total('gross'))+' · Costs ₹'+money(total('cost'))+' · Net ₹'+money(total('net'))+' · Max closed-trade drawdown ₹'+money(data.max_drawdown);
+    if(data.trades.length){
+      const wrap=document.createElement('div'), table=document.createElement('table');
+      wrap.className='table-wrap';wrap.append(table);out.append(wrap);
+      const head=table.createTHead().insertRow();
+      for(const name of ['Date','Side','Exit','Gross ₹','Costs ₹','Net ₹','Drawdown ₹']){const th=document.createElement('th');th.textContent=name;head.append(th);}
+      const body=table.createTBody();
+      for(const t of data.trades){const row=body.insertRow();for(const v of [t.date,t.side,t.exit,money(t.gross),money(t.cost),money(t.net),money(t.drawdown)])row.insertCell().textContent=v;}
+    }
+  }catch(err){out.textContent='Replay unavailable · '+err.message;}finally{button.disabled=false;}
+});
+</script>
+""", live=True,
         active="timemachine",
     )
 
 
 def chain_page(lang: str, query: dict) -> str:
-    t = lambda k: i18n_mod.t(k, lang)
+    """Render only the latest background snapshot, including its last failure."""
     symbol = (query.get("symbol") or ["NIFTY"])[0].upper()
     if symbol not in ("NIFTY", "BANKNIFTY"):
         symbol = "NIFTY"
-    try:
-        chain = _cached(f"chain:{symbol}", 60, lambda: options_mod.fetch_chain(symbol))
-    except Exception as exc:  # noqa: BLE001
-        return _page(lang, t("option_chain"), f"<p>unavailable: {_esc(exc)}</p>")
-    if "error" in chain:
-        return _page(
-            lang,
-            t("option_chain"),
-            f"<p>Option chain unavailable: {_esc(chain['error'])}</p>"
-            f"<p><a href='/chain?symbol=NIFTY&lang={lang}'>NIFTY</a> | "
-            f"<a href='/chain?symbol=BANKNIFTY&lang={lang}'>BANKNIFTY</a></p>",
-            active="chain",
-        )
-    summary = options_mod.pcr_summary(chain)
-    strikes = chain.get("strikes", [])[:30]
-    rows = "".join(
-        f"<tr><td>{_esc(s.get('strike', ''))}</td>"
-        f"<td>{_esc(s.get('ce', {}).get('lastPrice', ''))}</td>"
-        f"<td>{_esc(s.get('ce', {}).get('openInterest', ''))}</td>"
-        f"<td>{_esc(s.get('pe', {}).get('lastPrice', ''))}</td>"
-        f"<td>{_esc(s.get('pe', {}).get('openInterest', ''))}</td></tr>"
-        for s in strikes
+    snapshot = poller_mod.get_chain(symbol)
+    chain = snapshot.get("data")
+    title = i18n_mod.t("option_chain", lang)
+    tabs = "".join(
+        f"<a href='?symbol={s}&lang={lang}' aria-current='{str(s == symbol).lower()}'>{s}</a>"
+        for s in ("NIFTY", "BANKNIFTY")
     )
-    body = (
-        f"<p><a href='/chain?symbol=NIFTY&lang={lang}'>NIFTY</a> | "
-        f"<a href='/chain?symbol=BANKNIFTY&lang={lang}'>BANKNIFTY</a></p>"
-        f"<p>Underlying: {summary.get('underlying')} | ATM: {summary.get('atm')} | "
-        f"PCR (PE OI / CE OI): {summary.get('pcr')} | "
-        f"CE OI: {summary.get('ce_oi')} | PE OI: {summary.get('pe_oi')}</p>"
-        f"<div class='table-wrap'><table><tr><th>Strike</th><th>CE LTP</th><th>CE OI</th>"
-        f"<th>PE LTP</th><th>PE OI</th></tr>{rows}</table></div>"
+    body = f"<div class='chain-controls'>{tabs}</div>"
+    error = snapshot.get("error")
+    if error:
+        body += f"<p class='feed-message' role='status'>Chain update unavailable · {_esc(error)}</p>"
+    if not chain:
+        if not error:
+            message = "NSE chain ka intezaar hai…" if lang == "hi" else "Waiting for the first NSE chain…"
+            body += f"<p class='loading' role='status'>{message}</p>"
+        body += "<p class='muted'>Background refresh enabled · <a href=''>Check again</a></p>"
+        return _page(lang, title, body, head_extra='<meta http-equiv="refresh" content="30">', active="chain")
+
+    expiry = (query.get("expiry") or [chain["expiry"]])[0]
+    if expiry not in chain["expiries"]:
+        body += "<p class='feed-message'>Selected expiry unavailable. Showing nearest available expiry.</p>"
+        expiry = chain["expiry"]
+    selected = chain["expiries"][expiry]
+    choices = "".join(
+        f"<option{' selected' if day == expiry else ''}>{_esc(day)}</option>"
+        for day in chain["expiries"]
     )
-    return _page(lang, f"{t('option_chain')} — {symbol}", body, active="chain")
+    body += (
+        f"<form class='expiry' method='get'><input type='hidden' name='symbol' value='{symbol}'>"
+        f"<input type='hidden' name='lang' value='{lang}'><label>Expiry <select name='expiry'>{choices}"
+        "</select></label> <button>Apply</button></form>"
+    )
+
+    def fmt(value, spec):
+        return format(value, spec) if value is not None else "—"
+
+    metrics = (("Underlying", chain["underlying"], ",.2f"), ("ATM", selected["atm_strike"], ",g"),
+               ("PCR", selected["pcr"], ".2f"), ("Max pain", selected["max_pain"], ",g"),
+               ("CALL OI", selected["total_ce_oi"], ","), ("PUT OI", selected["total_pe_oi"], ","))
+    body += "<div class='metrics'>" + "".join(
+        f"<div><small>{label}</small><strong>{fmt(value, spec)}</strong></div>"
+        for label, value, spec in metrics
+    ) + "</div>"
+    strikes = selected["strikes"]
+    atm = selected["atm_strike"]
+    middle = next((i for i, row in enumerate(strikes) if row["strike"] == atm), 0)
+    start = max(0, min(middle - 10, len(strikes) - 21))
+    rows = []
+    years = greeks.years_left(chain.get("as_on"), expiry)
+    peak = {side: max(((r[side] or {}).get("oi") or 0 for r in strikes), default=0)
+            for side in ("ce", "pe")}
+    for row in strikes[start:start + 21]:
+        def cells(side):
+            quote = dict(row[side] or {})
+            quote.update(greeks.solve(chain["underlying"], row["strike"], quote.get("last_price"), years, side == "ce"))
+            spot = chain["underlying"]
+            itm = spot is not None and (row["strike"] < spot if side == "ce" else row["strike"] > spot)
+            def cell(key, spec):
+                maximum = key == "oi" and peak[side] and quote.get("oi") == peak[side]
+                css = "peak-oi" if maximum else "itm" if itm else ""
+                hint = " · Max OI" if maximum else " · ITM" if itm and key == "last_price" else ""
+                return f"<td class='{css}'>{fmt(quote.get(key), spec)}{hint}</td>"
+            return "".join(cell(k, spec)
+                           for k, spec in (("last_price", ",.2f"), ("iv", ".2f"), ("oi", ","),
+                                           ("model_iv", ".2f"), ("delta", ".3f"), ("gamma", ".6f"),
+                                           ("theta", ".3f"), ("vega", ".3f")))
+        at_money = row["strike"] == atm
+        label = " · ATM" if at_money else ""
+        if row["strike"] == selected["max_pain"]:
+            label += " · MP"
+        rows.append(f"<tr{' class=atm' if at_money else ''}>{cells('ce')}"
+                    f"<th scope='row'>{row['strike']:,g}{label}</th>{cells('pe')}</tr>")
+    body += (
+        f"<section class='card'><h3>{symbol} · {_esc(expiry)}</h3>"
+        f"<p class='muted'>{'Last good snapshot' if error else 'Snapshot'} · "
+        f"{_esc(chain.get('source', 'NSE'))} as of {_esc(chain.get('as_on') or 'unknown')} · received {_esc(snapshot['received'])}</p>"
+        "<div class='table-wrap'><table class='chain-table'><thead><tr><th colspan='8' class='opt-call'>CALL · CE</th>"
+        "<th rowspan='2'>Strike</th><th colspan='8' class='opt-put'>PUT · PE</th></tr><tr>"
+        + ("<th>LTP</th><th>Feed IV %</th><th>OI</th><th>Model IV %</th><th>Delta</th><th>Gamma</th><th>Theta/day</th><th>Vega/pt</th>" * 2)
+        + "</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div><p class='note'>Showing {len(rows)} of {len(strikes)} "
+        "strikes. MP = max pain. ITM = in the money. Max OI is measured across the entire expiry. Totals use the full selected expiry. Model uses last price and spot at snapshot time, expiry 15:30 IST, ACT/365, zero interest and dividend yields. — = missing input, expired contract or no positive IV solution.</p></section>"
+    )
+    return _page(lang, title, body, active="chain")
 
 
 def sizing_page(lang: str, query: dict) -> str:
@@ -2653,9 +2861,12 @@ def paper_page(lang: str) -> str:
     exit_rows = ""
     for p in positions:
         try:
-            news_result = _cached(
-                f"news:{p['symbol']}", 300,
-                lambda s=p["symbol"]: news_mod.check_symbol(s))
+            if poller_mod.is_running():
+                news_result = poller_mod.get_news(p["symbol"]) or {"unavailable": True}
+            else:
+                news_result = _cached(
+                    f"news:{p['symbol']}", 300,
+                    lambda s=p["symbol"]: news_mod.check_symbol(s))
         except Exception:  # noqa: BLE001 - news failure never blocks the page
             news_result = {"unavailable": True}
         try:
@@ -2702,6 +2913,8 @@ def _api_flow() -> dict:
     warmed = poller_mod.get_flow()
     if warmed is not None:
         return warmed
+    if poller_mod.is_running():
+        return {"series": [], "failed": [], "error": "Flow feed warming up"}
     try:
         return _cached("api:flow", 300, charts_mod.flow_series)
     except Exception as exc:  # noqa: BLE001
@@ -2714,6 +2927,8 @@ def _api_sectors() -> dict:
     warmed = poller_mod.get_sectors()
     if warmed is not None:
         return warmed
+    if poller_mod.is_running():
+        return {"sectors": [], "failed": [], "error": "Sector feed warming up"}
     try:
         flow = _cached("api:flow", 300, charts_mod.flow_series)
         return charts_mod.sector_map(flow)
@@ -2739,6 +2954,8 @@ def _api_quotes() -> dict:
     if warmed is not None:
         return {"quotes": warmed,
                 "as_of": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")}
+    if poller_mod.is_running():
+        return {"quotes": [], "error": "Index quotes warming up"}
     out = []
     for symbol, label in _QUOTE_SYMBOLS:
         try:
@@ -2779,6 +2996,8 @@ def _api_intraday(query: dict) -> dict:
     warmed = poller_mod.get_intraday(symbol)
     if warmed is not None:
         return warmed
+    if poller_mod.is_running():
+        return {"symbol": symbol, "line": [], "candles": [], "error": "Intraday feed warming up"}
     try:
         return _cached(
             f"chart:{symbol}", 60, lambda: charts_mod.intraday_series(symbol)
@@ -2831,6 +3050,8 @@ def _api_timemachine() -> dict:
     body for the lazy page load."""
     data = poller_mod.get_timemachine()
     if data is None:
+        if poller_mod.is_running():
+            return {"error": "Background scan warming up", "html": ""}
         try:
             data = _cached("timemachine", 600, timecheck_mod.collect_timemachine)
         except Exception as exc:  # noqa: BLE001
@@ -2926,6 +3147,8 @@ def _api_levels(query: dict, lang: str) -> dict:
             "html": _levels_table_html(warmed, lang),
             "top_symbol": rows[0].get("symbol", "") if rows else "",
         }
+    if poller_mod.is_running():
+        return {"html": "", "error": "Levels scan warming up"}
     try:
         result = _cached("levels", 60, levels_mod.scan_levels)
     except Exception as exc:  # noqa: BLE001
@@ -2941,7 +3164,11 @@ def _api_levelsbreakdown(query: dict, lang: str) -> dict:
     """Signal breakdown HTML fragment for one index's levels."""
     symbol = (query.get("symbol") or ["NIFTY"])[0].upper()
     try:
-        result = _cached("levels", 60, levels_mod.scan_levels)
+        result = poller_mod.get_levels()
+        if result is None:
+            if poller_mod.is_running():
+                return {"html": "", "error": "Levels scan warming up"}
+            result = _cached("levels", 60, levels_mod.scan_levels)
     except Exception as exc:  # noqa: BLE001
         return {"html": "", "error": f"levels unavailable: {exc}"}
     rows = result.get("levels", [])
@@ -3001,11 +3228,11 @@ def _robot_html() -> str:
         return stamp[11:19] if len(stamp) >= 19 else (stamp or "—")
 
     market = "OPEN" if st.get("market_open") else "closed (slow polls)"
-    live_badge = ("<span class='pill'><span class='dot'></span>LIVE</span>"
+    live_badge = ("<span class='pill'>Background job updated</span>"
                   if st.get("fresh") else "<span>warming up…</span>")
     scans = (
         f"Last scans — indices {_clock(ticks.get('indices', ''))} · "
-        f"spark {_clock(ticks.get('spark', ''))} · intraday "
+        f"spark {_clock(ticks.get('spark_fast', ''))} · intraday "
         f"{_clock(ticks.get('intraday', ''))} · flow "
         f"{_clock(ticks.get('flow', ''))} · news "
         f"{_clock(ticks.get('news', ''))} · scans "
@@ -3092,7 +3319,7 @@ def _robot_html() -> str:
         f"<div class='card'><div class='ml-h'><h3>BOT</h3>"
         f"<span class='sub'>news check + 10,000 replays + volume — "
         f"entry/exit isse banta hai</span><span class='sp'></span>"
-        f"<span class='pill'><span class='dot'></span>LIVE</span></div>"
+        f"{live_badge}</div>"
         f"<p class='muted'>Market {market} · {counts}</p>"
         f"{panel}<p class='muted'>{scans}</p>{backoff}</div>"
     )
@@ -3177,6 +3404,8 @@ def _api_levelsmini() -> dict:
     """Levels mini-summary HTML fragment for home."""
     result = poller_mod.get_levels()
     if result is None:
+        if poller_mod.is_running():
+            return {"error": "Background scan warming up", "html": ""}
         try:
             result = _cached("levels", 60, levels_mod.scan_levels)
         except Exception as exc:  # noqa: BLE001
@@ -3222,6 +3451,8 @@ def _api_tmmini() -> dict:
     """Time Machine mini-summary HTML fragment for home."""
     data = poller_mod.get_timemachine()
     if data is None:
+        if poller_mod.is_running():
+            return {"error": "Background scan warming up", "html": ""}
         try:
             data = _cached("timemachine", 600, timecheck_mod.collect_timemachine)
         except Exception as exc:  # noqa: BLE001
@@ -3233,11 +3464,48 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # keep the console quiet
         pass
 
+    def do_POST(self):
+        url = urlparse(self.path)
+        if url.path != "/api/history":
+            self.send_error(404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 8 * 1024 * 1024:
+                raise ValueError("CSV must be between 1 byte and 8 MiB.")
+            q = parse_qs(url.query)
+            args = [q.get(k, [""])[0] for k in ("start", "end", "fee", "slip", "qty")]
+            result = range_replay.replay(self.rfile.read(length).decode("utf-8"), *args, strategy=q.get("strategy", ["orb15"])[0])
+        except (ValueError, UnicodeError) as exc:
+            result = {"error": str(exc)}
+        self._send_json(result)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         lang = _lang(query)
         try:
+            details = {
+                "/api/orbchart": lambda: _api_orbchart(query),
+                "/api/levelschart": lambda: _api_levelschart(query),
+                "/api/timemachine-check": lambda: _api_timemachine_check(query),
+                "/api/orbbreakdown": lambda: _api_orbbreakdown(query, lang),
+                "/api/levelsbreakdown": lambda: _api_levelsbreakdown(query, lang),
+                "/api/skills": lambda: _api_skills(),
+                "/api/stock": lambda: _api_stock(query),
+            }
+            build = details.get(parsed.path)
+            if build:
+                if self.headers.get("Prefer") == "respond-async":
+                    key = (parsed.path, tuple(sorted((k,v[0]) for k,v in query.items())))
+                    status, result = _detail_jobs.read(key, build)
+                    self._send_json(result, status)
+                else:
+                    self._send_json(build())
+                return
+            if parsed.path == "/healthz":
+                self._send_json({"status": "ok"})
+                return
             if parsed.path == "/api/flow":
                 self._send_json(_api_flow())
                 return
@@ -3250,29 +3518,14 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/intraday":
                 self._send_json(_api_intraday(query))
                 return
-            if parsed.path == "/api/orbchart":
-                self._send_json(_api_orbchart(query))
-                return
-            if parsed.path == "/api/levelschart":
-                self._send_json(_api_levelschart(query))
-                return
             if parsed.path == "/api/timemachine":
                 self._send_json(_api_timemachine())
-                return
-            if parsed.path == "/api/timemachine-check":
-                self._send_json(_api_timemachine_check(query))
                 return
             if parsed.path == "/api/orb":
                 self._send_json(_api_orb(query, lang))
                 return
-            if parsed.path == "/api/orbbreakdown":
-                self._send_json(_api_orbbreakdown(query, lang))
-                return
             if parsed.path == "/api/levels":
                 self._send_json(_api_levels(query, lang))
-                return
-            if parsed.path == "/api/levelsbreakdown":
-                self._send_json(_api_levelsbreakdown(query, lang))
                 return
             if parsed.path == "/api/news":
                 self._send_json(_api_news(query, lang))
@@ -3291,12 +3544,6 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/tmmini":
                 self._send_json(_api_tmmini())
-                return
-            if parsed.path == "/api/skills":
-                self._send_json(_api_skills())
-                return
-            if parsed.path == "/api/stock":
-                self._send_json(_api_stock(query))
                 return
             if parsed.path.startswith("/static/"):
                 served = _static_file(parsed.path[len("/static/"):])
@@ -3336,15 +3583,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(body, 404)
                 return
             self._send(body, 200)
+        except (BrokenPipeError, ConnectionResetError):
+            return  # The browser navigated away while a section was loading.
         except Exception as exc:  # noqa: BLE001 - never crash the server on a page
             self._send(_page(lang, "Error", f"<p>Something went wrong: {_esc(exc)}</p>"), 500)
 
-    def _send_json(self, payload: dict):
+    def _send_json(self, payload: dict, status: int = 200):
         try:
             data = json.dumps(payload, default=str).encode("utf-8")
         except Exception as exc:  # noqa: BLE001
             data = json.dumps({"error": str(exc)}).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
