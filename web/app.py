@@ -356,7 +356,7 @@ a.icard{{display:block}}
 .tpanel .chk{{display:flex;flex-direction:column;gap:1px;margin:3px 0;font-size:11px}}
 .foot{{color:var(--muted);font-size:10.5px;text-align:center;padding:0 0 14px}}
 .divider{{height:1px;background:#d9dee6;margin:8px 0 6px}}
-</style><link rel="stylesheet" href="/static/terminal.css">{head_extra}</head>
+</style><link rel="stylesheet" href="/static/terminal.css?v=2">{head_extra}</head>
 <body><div id="ml-disc"><b>Paper trading only · not investment advice.</b> Real NSE/Yahoo feeds; when market is closed, prices stay frozen.</div>
 <div class='ml-top'><span class='brand-mark'>BT</span><h1>Bhanu Indian Day Trader</h1><span class='sp'></span>
 <time class='session-clock' id='session-clock'></time>
@@ -384,7 +384,7 @@ function bhanuTheme(){{
 }}
 try{{var s=localStorage.getItem('bhanu-theme');if(s){{document.documentElement.setAttribute('data-theme',s);}}}}catch(e){{}}
 </script>
-<script src="/static/pro_terminal.js" defer></script>
+<script src="/static/pro_terminal.js?v=2" defer></script>
 {scripts}
 </body></html>"""
 
