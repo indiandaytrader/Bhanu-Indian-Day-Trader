@@ -425,7 +425,6 @@ class TestNews(unittest.TestCase):
                 patch.object(news_mod, "STATE_PATH", state_path),
                 patch.object(news_mod, "fetch_nse_announcements", return_value=(nse_items, "")),
                 patch.object(news_mod, "fetch_yahoo_headlines", return_value=(yahoo_items, "")),
-                patch.object(news_mod, "fetch_google_news", return_value=([], "")),
                 patch.object(news_mod, "fetch_bse_announcements", return_value=([], "bse note")),
                 patch.object(news_mod, "fetch_marketaux_news", return_value=([], "no key")),
                 patch("bhanu.data.fetch_quote", return_value={
@@ -683,8 +682,6 @@ class TestMarketaux(unittest.TestCase):
                              return_value=(mx_items, "")),
                 patch.object(news_mod, "fetch_yahoo_headlines",
                              return_value=(yahoo_items, "")),
-                patch.object(news_mod, "fetch_google_news",
-                             return_value=([], "")),
                 patch("bhanu.data.fetch_quote", return_value={
                     "price": 25900.0, "prev_close": 25800.0, "change_pct": 0.39}),
             ]
@@ -2855,7 +2852,8 @@ class TestLiveRealtime(unittest.TestCase):
         # 2-second live tick machinery exists…
         self.assertIn("bhanuLiveLineTick", js)
         self.assertIn("bhanuStartLiveLine", js)
-        self.assertIn("setInterval(run,2000)", js)
+        self.assertIn("var BHANU_TICK_MS=2000;", js)
+        self.assertIn("setInterval(run,BHANU_TICK_MS)", js)
         self.assertIn("/api/live?symbol=", js)
         # …and the old 60-second full re-fetch of the line is gone.
         self.assertNotIn("fetchLine", js)
@@ -3109,9 +3107,14 @@ class TestMarketLabLook(unittest.TestCase):
         self.assertTrue(payload["candles"])
         self.assertEqual(set(payload["overlays"]),
                          {"orderblock", "fvg", "structure", "liquidity",
-                          "vwap", "trades"})
+                          "vwap", "trades", "rsi", "macd"})
         self.assertFalse(payload["overlays"]["liquidity"])
         self.assertTrue(payload["overlays"]["vwap"])
+        # 60 synthetic bars: RSI (14) and MACD both have data.
+        self.assertTrue(payload["overlays"]["rsi"])
+        self.assertTrue(payload["overlays"]["macd"])
+        self.assertTrue(payload["rsi"])
+        self.assertTrue(payload["macd"]["line"])
         # No two visible axis labels sit on top of each other: any two
         # visible lines are more than the 4% dedupe threshold apart.
         price_range = float(bars["high"].max() - bars["low"].min())
@@ -3243,15 +3246,16 @@ class TestSmoothCharts(unittest.TestCase):
     def test_tick_glides_last_point_in_place(self):
         from web import app as app_mod
         js = app_mod._chart_js()
-        # Tween machinery exists.
-        self.assertIn("bhanuAnimLast", js)
-        self.assertIn("bhanuEase", js)
+        # Continuous-motion machinery exists: one persistent rAF loop
+        # per chart, retargeted from the displayed value on each tick.
+        self.assertIn("bhanuLineAnim", js)
+        self.assertIn("bhanuLineRetarget", js)
         self.assertIn("requestAnimationFrame", js)
         self.assertIn("bhanuSvgLineLast", js)
-        # The tick uses the tween…
+        # The tick retargets the loop…
         tick = js[js.index("function bhanuLiveLineTick"):
                   js.index("function bhanuStartLiveLine")]
-        self.assertIn("bhanuAnimLast(", tick)
+        self.assertIn("bhanuLineRetarget(", tick)
         # …and never re-sets the whole series or rebuilds the SVG.
         self.assertNotIn("setData(", tick)
         self.assertNotIn("bhanuSvgLine(st.el", tick)
@@ -3276,7 +3280,8 @@ class TestSmoothCharts(unittest.TestCase):
     def test_tick_cadence_is_two_seconds(self):
         from web import app as app_mod
         js = app_mod._chart_js()
-        self.assertIn("setInterval(run,2000)", js)
+        self.assertIn("var BHANU_TICK_MS=2000;", js)
+        self.assertIn("setInterval(run,BHANU_TICK_MS)", js)
         # Rebase still every ~5 minutes (150 ticks at 2 s), not 60.
         self.assertIn("ticks%150===0", js)
         self.assertNotIn("ticks%60===0", js)
