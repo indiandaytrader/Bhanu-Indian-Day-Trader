@@ -1544,9 +1544,10 @@ body.is-market-closed .bot-live-ribbon {
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
 }
 
-/* 7-Tab Bottom Nav (visible on mobile/tablet, hidden on wide desktop) */
+/* 7-Tab Bottom Nav (visible by default — shown on mobile/tablet, hidden only on wide desktop).
+   Fail-visible: if a media query is ever mis-evaluated, the nav shows instead of vanishing. */
 .bottom-nav {
-  display: none;
+  display: grid;
   position: fixed;
   left: 0;
   right: 0;
@@ -1557,6 +1558,12 @@ body.is-market-closed .bot-live-ribbon {
   grid-template-columns: repeat(7, minmax(0, 1fr));
   padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
   backdrop-filter: blur(8px);
+}
+
+@media (min-width: 961px) {
+  .bottom-nav {
+    display: none;
+  }
 }
 
 .bottom-nav a {
@@ -1604,10 +1611,6 @@ body.is-market-closed .bot-live-ribbon {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px;
-  }
-
-  .bottom-nav {
-    display: grid;
   }
 }
 
