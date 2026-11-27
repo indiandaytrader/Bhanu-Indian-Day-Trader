@@ -2861,6 +2861,51 @@ class TestLiveRealtime(unittest.TestCase):
         self.assertIn("setInterval(function(){\n      bhanuQuoteFetch()",
                       js)
 
+    def test_api_live_resolves_display_symbol(self):
+        # /api/live serves the candle live-tick for any chart symbol:
+        # display symbols resolve through the same universe map as
+        # /api/levelschart, served from the poller's spark feed.
+        import copy
+        from bhanu import data as data_mod
+        from bhanu import poller as poller_mod
+        saved_spark = copy.deepcopy(poller_mod.STATE["spark"])
+        try:
+            yahoo = data_mod.UNIVERSE["RELIANCE"]
+            poller_mod.STATE["spark"][yahoo] = {
+                "ltp": 1500.5, "prev": 1490.0, "time": 1700000060,
+                "closes": [{"t": 1700000000, "c": 1499.0},
+                           {"t": 1700000060, "c": 1500.5}]}
+            from web import app as app_mod
+            out = app_mod._api_live({"symbol": ["RELIANCE"]})
+            self.assertEqual(out["ltp"], 1500.5)
+            self.assertIsNone(out["error"])
+            # Index display symbol resolves to its Yahoo symbol too.
+            self._seed_spark()
+            out = app_mod._api_live({"symbol": ["NIFTY"]})
+            self.assertEqual(out["ltp"], 25790.0)
+            self.assertIsNone(out["error"])
+        finally:
+            poller_mod.STATE["spark"] = saved_spark
+
+    def test_candles_tick_live_on_2s_feed(self):
+        from web import app as app_mod
+        js = app_mod._chart_js()
+        # Live-ticking last candle: 2s tick from the same /api/live
+        # feed as the home line charts, via series.update() — never
+        # a chart rebuild — with a new candle on a new 5m bucket.
+        self.assertIn("bhanuCandleLiveTick", js)
+        self.assertIn("bhanuStartLiveCandle", js)
+        self.assertIn("bhanuStopLiveCandle", js)
+        self.assertIn("series.update(upd)", js)
+        self.assertIn("Math.floor(nowSec/300)", js)
+        self.assertIn("Math.floor(last.time/300)", js)
+        # Wired into every chart bhanuCandleRender builds, and the
+        # timer is stopped when the Levels chart is disposed.
+        self.assertIn("bhanuStartLiveCandle(id)", js)
+        self.assertIn("bhanuStopLiveCandle('levels-chart')", js)
+        # Same guards as bhanuLiveTick: hidden tab / market closed.
+        self.assertIn("document.hidden||document.body.classList.contains('is-market-closed')", js)
+
     def test_live_indicator_promises_seconds(self):
         from web import app as app_mod
         html = app_mod.home("en")
