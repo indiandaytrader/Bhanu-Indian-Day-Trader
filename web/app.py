@@ -744,11 +744,13 @@ function bhanuStartLiveLine(id, symbol){
         var st=window.bhanuLines[id];
         if(p2&&!p2.error&&p2.line&&p2.line.length&&st){
           var nl=p2.line.slice();
-          if(st.series){st.series.setData(nl);}
+          var nc=bhanuDirColor(p2);
+          if(st.series){st.series.setData(nl);if(nc!==st.color){st.series.applyOptions({color:nc});}}
           st.line=nl;
           st.lastTime=nl[nl.length-1].time;
           st.lastValue=nl[nl.length-1].value;
-          if(st.el){bhanuSvgLine(st.el,nl,st.color||'#2563eb');}
+          st.color=nc;
+          if(st.el){bhanuSvgLine(st.el,nl,nc);}
           bhanuSparkFor(symbol,p2.line);
         }
       }).catch(function(){});
@@ -759,6 +761,12 @@ function bhanuStartLiveLine(id, symbol){
   window.bhanuLiveTimers[id]=setInterval(run,2000);
   run();
 }
+function bhanuDirColor(p){
+  if(p&&p.color){return p.color;}
+  var c=p?p.change_pct:null;
+  if(c===null||c===undefined){return '#2563eb';}
+  return c>=0?'#059669':'#E11D48';
+}
 function bhanuLineRender(id, p, symbol){
   var el=document.getElementById(id);if(!el)return;
   if(!p||!p.line||p.line.length===0){bhanuUnavailable(el,p&&p.error?p.error:'no price data');return;}
@@ -766,20 +774,21 @@ function bhanuLineRender(id, p, symbol){
   if(cacheNote)cacheNote.textContent=p.stale?'Stale bars · cache saved '+(p.as_of||'time unavailable'):'';
   var lastTime=p.line[p.line.length-1].time;
   var lastVal=p.line[p.line.length-1].value;
+  var col=bhanuDirColor(p);
   bhanuSparkFor(symbol,p.line);
   if(typeof LightweightCharts==='undefined'){
     var line=p.line.slice();
-    bhanuSvgLine(el,line,p.color||'#2563eb');
-    window.bhanuLines[id]={el:el,series:null,line:line,lastTime:lastTime,lastValue:lastVal,color:p.color||'#2563eb'};
+    bhanuSvgLine(el,line,col);
+    window.bhanuLines[id]={el:el,series:null,line:line,lastTime:lastTime,lastValue:lastVal,color:col};
     bhanuStartLiveLine(id,symbol);
     return;
   }
   var o=bhanuChartOpts(260);o.width=el.clientWidth||900;
   var ch=LightweightCharts.createChart(el,o);
-  var s=ch.addLineSeries({color:p.color||'#2563eb',lineWidth:2});
+  var s=ch.addLineSeries({color:col,lineWidth:2});
   s.setData(p.line);ch.timeScale().fitContent();
   window.addEventListener('resize',function(){ch.applyOptions({width:el.clientWidth||900});});
-  window.bhanuLines[id]={el:el,chart:ch,series:s,line:p.line.slice(),lastTime:lastTime,lastValue:lastVal,color:p.color||'#2563eb'};
+  window.bhanuLines[id]={el:el,chart:ch,series:s,line:p.line.slice(),lastTime:lastTime,lastValue:lastVal,color:col};
   bhanuStartLiveLine(id,symbol);
 }
 function bhanuLineChart(id, symbol){
@@ -3285,7 +3294,9 @@ def _api_live(query: dict) -> dict:
     if prev is None:
         prev = entry.get("prev")
     pct = round((ltp / prev - 1) * 100, 2) if ltp and prev else None
+    col = "#059669" if pct is not None and pct >= 0 else ("#E11D48" if pct is not None else "#2563eb")
     return {"symbol": symbol, "ltp": ltp, "prev": prev, "change_pct": pct,
+            "color": col,
             "time": entry.get("time") or 0, "line": line, "error": None}
 
 
