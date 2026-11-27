@@ -2,54 +2,30 @@
 """Bhanu Indian Day Trader — web dashboard.
 
 Stdlib-only HTTP server (no framework). Pages:
-  /         home — index quotes + intraday charts, Smart Money Flow,
-            sector map, news feed, ORB hits, robot status, levels and
-            Time Machine summaries (charts on top, tables below)
-  /api/poller, /api/robot  live-engine status + robot card (in-memory,
-            instant — these never fetch)
-  /orb      ORB scanner + candlestick chart with overlays (VWAP, OB/FVG,
-            structure, entry/SL/TP boxes, PDH/PDL)
-  /levels   live support/resistance + candlestick chart with overlays
+  /         home — Market Mood & Breadth strip, index quotes + intraday
+            charts, Smart Money Flow, sector map, robot / best setup,
+            news feed, ORB hits, levels and Time Machine summaries
+  /bot      dedicated Bhanu Auto-Scan Bot page (fixed side-by-side
+            auto-scan card + Aaj Ka Best Setup + top scanned setups)
+  /stock    per-stock detail page (1m/5m/15m/1H/D + all overlays +
+            setup panel + backtest stats)
+  /orb      ORB scanner + candlestick chart with 5m/10m/15m/1h switcher
+            and overlays (VWAP, OB/FVG, structure, entry/SL/TP, PDH/PDL)
+  /levels   live support/resistance + candlestick chart with 5m/10m/15m/1h
+            switcher and overlays
   /sectors  sector map (bubble chart) + sector bar list
-  /chain    Nifty / Bank Nifty option chain with OI + PCR
+  /chain    Nifty / Bank Nifty option chain with OI, PCR, Greeks & Theta Radar
   /sizing   position sizing calculator (four limits, budget is an input)
-  /paper    paper trading ledger
+  /paper    paper trading execution desk (BUY CALL / BUY PUT / SELL, live 2s
+            MTM, 1-tap Square Off), Risk Guardian, Pre-Trade Checklist,
+            Auto Trade Journal + server-side paper ledger
   /skills   all 11 DayTrader skills — what each does + live status + news
-  /timemachine  Monte Carlo Time Machine (distribution chart) + trade
-            check + ORB backtest
-  /api/flow, /api/sectors  JSON for the lazy-loaded flow/sector charts
-  /api/quotes, /api/intraday, /api/orbchart, /api/levelschart,
-  /api/timemachine, /api/news  JSON for the 60-second auto-refresh
-  /api/orb, /api/orbbreakdown, /api/levels, /api/levelsbreakdown
-            HTML fragments for the lazy-loaded scan tables and signal
-            breakdowns (home, /orb, /levels)
-  /static/lightweight-charts.js  the chart library, bundled locally
-            (no CDN dependency — charts render even when the CDN is
-            slow or blocked)
+  /timemachine  Monte Carlo Time Machine (10,000 replays trade-input form
+            + distribution chart) + trade check + ORB backtest
 
-Pages render INSTANTLY from local data only: a background live engine
-(``bhanu.poller``) keeps quotes, intraday bars, flow, sectors, news,
-scans and the Time Machine warm in memory, so every network fetch
-happens in the background, never on a page load. Each section loads
-lazily from /api/* after the page, with a "loading" state until the
-data arrives. When the engine has nothing yet, the page falls back to
-the on-demand fetchers (same caches as before: quotes/charts 60s,
-flow/sector 5 min, the Time Machine 10 min) — a slow source delays
-one card, never the page. When a source is unavailable the page says
-so plainly — no fake data is ever shown.
-
-Charts render with TradingView Lightweight Charts, bundled locally
-(web/static/lightweight-charts.js); when the library cannot load, a
-built-in SVG line/candlestick chart is drawn instead — a chart box
-is never left blank.
-REAL-TIME, not refresh: index quotes and the home line charts tick
-every 2 seconds — the background engine sparks the 3 indices every
-2 s and the browser updates each chart's last point in place
-(``/api/live``), so the line visibly moves while you watch. No page
-reload, no 60-second wait. The LIVE indicator updates on every
-successful tick. Slower sections (flow, sectors, news, ORB scans)
-sync in place on their own cadence (60 s / 2–5 min) because their
-data only changes that often — they never ask for a reload either.
+Real-time NSE data only — no fake/sample prices are ever fabricated.
+When the market is closed, the frontend freezes live polling and animations
+and displays a clear "Market Closed" status.
 Paper trading only: nothing here places a real order.
 """
 
@@ -68,13 +44,14 @@ from zoneinfo import ZoneInfo
 from bhanu import charts as charts_mod
 from bhanu import config as config_mod
 from bhanu import data as data_mod
+from bhanu import greeks
 from bhanu import i18n as i18n_mod
 from bhanu import levels as levels_mod
-from bhanu import range_replay
-from web.detail_jobs import DetailJobs
-from bhanu import greeks
+from bhanu import news as news_mod
 from bhanu import options as options_mod
 from bhanu import paper as paper_mod
+from bhanu import poller as poller_mod
+from bhanu import range_replay
 from bhanu import scanner as scanner_mod
 from bhanu import signal as signal_mod
 from bhanu import sizing as sizing_mod
@@ -82,21 +59,16 @@ from bhanu import skills as skills_mod
 from bhanu import stock as stock_mod
 from bhanu import timecheck as timecheck_mod
 from bhanu import volume as volume_mod
-from bhanu import news as news_mod
-from bhanu import poller as poller_mod
+from web.detail_jobs import DetailJobs
 
 IST = ZoneInfo("Asia/Kolkata")
 ROOT = Path(__file__).resolve().parent.parent
 PORT = int(os.environ.get("PORT", "8810"))
 
-#: Auto-refresh interval for chart pages (milliseconds). Every 60s each
-#: registered chart re-fetches its data and updates in place — no page
-#: reload. Server-side caches are 30–600s, so a tick usually returns
-#: fresh-enough data without hammering Yahoo/NSE.
+#: Auto-refresh interval for slow chart sections (milliseconds).
 LIVE_REFRESH_MS = 60_000
 
 _detail_jobs = DetailJobs()
-
 _cache: dict[str, tuple[float, object]] = {}
 
 
@@ -122,9 +94,8 @@ def _esc(value) -> str:
 
 def _opt(direction) -> str:
     """User-facing option label for a trade direction: CALL (green) for
-    a long, PUT (red) for a short. Display only — the internal
-    direction stays 'long'/'short' everywhere (API JSON, logic,
-    sizing, poller)."""
+    a long, PUT (red) for a short. Display only — internal direction
+    stays 'long'/'short' everywhere."""
     if str(direction).lower() == "short":
         return "<span class='opt-put'>PUT</span>"
     if str(direction).lower() == "long":
@@ -133,8 +104,7 @@ def _opt(direction) -> str:
 
 
 def _opt_text(direction) -> str:
-    """Plain-text CALL/PUT label for contexts that cannot render HTML
-    (e.g. JS textContent). Same mapping as _opt."""
+    """Plain-text CALL/PUT label for non-HTML contexts."""
     if str(direction).lower() == "short":
         return "PUT"
     if str(direction).lower() == "long":
@@ -142,11 +112,6 @@ def _opt_text(direction) -> str:
     return str(direction)
 
 
-#: TradingView Lightweight Charts (pinned version). The library is
-#: bundled locally (web/static/lightweight-charts.js, Apache 2.0) so
-#: charts render even when the CDN is slow or blocked — a chart is
-#: never blank because of the network. The CDN is only a fallback
-#: when the local file is missing from disk.
 CHART_CDN = (
     "https://unpkg.com/lightweight-charts@4.2.0"
     "/dist/lightweight-charts.standalone.production.js"
@@ -154,12 +119,86 @@ CHART_CDN = (
 CHART_LOCAL = "lightweight-charts.js"
 
 
+def _modals_html() -> str:
+    """Shared Smart Alerts & Hinglish Learning Hub + Evening Replay modals."""
+    return (
+        "<div class='pro-modal-bg' id='pro-modal-alerts' onclick=\"if(event.target===this)BhanuPro.closeModals()\">"
+        "<div class='pro-modal'>"
+        "<div class='ml-h'><h3>🔔 Smart Price &amp; Level Alerts</h3><span class='sp'></span>"
+        "<button type='button' class='btn-ghost' onclick='BhanuPro.closeModals()'>✕</button></div>"
+        "<p class='muted'>Live 2s NSE feed cross hote hi ping sound + banner alert aayega.</p>"
+        "<div class='pro-form-grid' style='margin-top:8px'>"
+        "<div class='pro-field'><label>Symbol</label><select id='pro-alert-sym'>"
+        "<option value='^NSEI'>NIFTY 50</option><option value='^NSEBANK'>BANK NIFTY</option>"
+        "<option value='^BSESN'>SENSEX</option></select></div>"
+        "<div class='pro-field'><label>Condition</label><select id='pro-alert-cond'>"
+        "<option value='ABOVE'>Crosses Above</option><option value='BELOW'>Crosses Below</option></select></div>"
+        "<div class='pro-field'><label>Price Level</label><input id='pro-alert-price' type='number' step='0.5' placeholder='e.g. 25920'></div>"
+        "<div class='pro-field' style='display:flex;align-items:flex-end'><button type='button' class='btn-primary' style='width:100%' onclick='BhanuPro.addAlert()'>+ Set Alert</button></div>"
+        "</div>"
+        "<div id='pro-alerts-list'></div>"
+        "<div style='margin-top:10px'><button type='button' class='btn-ghost' onclick='BhanuPro.testAlertPing()'>🔊 Test Sound Ping</button></div>"
+        "</div></div>"
+        "<div class='pro-modal-bg' id='pro-modal-learn' onclick=\"if(event.target===this)BhanuPro.closeModals()\">"
+        "<div class='pro-modal'>"
+        "<div class='ml-h'><h3>🎓 Hinglish Learning Hub &amp; Evening Replay</h3><span class='sp'></span>"
+        "<button type='button' class='btn-ghost' onclick='BhanuPro.closeModals()'>✕</button></div>"
+        "<div style='margin:6px 0'>"
+        "<button type='button' class='opill on' onclick=\"BhanuPro.selectLearnTopic('ORB',this)\">ORB</button>"
+        "<button type='button' class='opill' onclick=\"BhanuPro.selectLearnTopic('VWAP',this)\">VWAP</button>"
+        "<button type='button' class='opill' onclick=\"BhanuPro.selectLearnTopic('BOS',this)\">BOS / CHoCH</button>"
+        "<button type='button' class='opill' onclick=\"BhanuPro.selectLearnTopic('OB',this)\">Order Block</button>"
+        "<button type='button' class='opill' onclick=\"BhanuPro.selectLearnTopic('FVG',this)\">FVG</button>"
+        "<button type='button' class='opill' onclick=\"BhanuPro.selectLearnTopic('THETA',this)\">Theta / IV</button>"
+        "</div>"
+        "<div class='tpanel' id='pro-learn-content'><strong>ORB (Opening Range Breakout):</strong><br>"
+        "1. 09:15–09:30 IST ka High aur Low mark karein.<br>"
+        "2. High volume ke saath 5m close ORB High ke upar = <span class='opt-call'>CALL</span>; ORB Low ke neeche = <span class='opt-put'>PUT</span>.<br>"
+        "3. Strict Stop Loss range midpoint ya VWAP par rakhein.</div>"
+        "<div class='ml-h' style='margin-top:10px'><h3>⏪ Evening Market Replay</h3><span class='sp'></span>"
+        "<span class='muted mono' id='replay-status' style='font-size:11px'>Real session candles</span></div>"
+        "<div class='chart-wrap' style='height:170px;border:1px solid var(--border);margin:6px 0'>"
+        "<canvas id='replay-canvas' style='width:100%;height:100%;display:block'></canvas></div>"
+        "<div style='display:flex;gap:8px;margin-top:8px'>"
+        "<button type='button' class='btn-primary' id='replay-play-btn' onclick='BhanuPro.toggleReplay()'>Play</button>"
+        "<button type='button' class='btn-ghost' onclick='BhanuPro.stepReplay()'>Step +1</button>"
+        "<button type='button' class='btn-ghost' onclick='BhanuPro.resetReplay()'>Reset</button>"
+        "</div></div></div>"
+    )
+
+
+def _bottom_nav_html(lang: str, active: str) -> str:
+    """7-tab mobile-first thumb-zone navigation (Home, Bot, Stock, ORB, Levels, Chain, Paper)."""
+    items = (
+        ("home", f"/?lang={lang}", "Home",
+         "<path d='M3 10.5L12 3l9 7.5V21h-6v-6H9v6H3v-10.5z'/>"),
+        ("bot", f"/bot?lang={lang}", "Bot",
+         "<rect x='4' y='8' width='16' height='12' rx='3'/><path d='M12 4v4M9 13h.01M15 13h.01M9 17h6'/>"),
+        ("stock", f"/stock?symbol=NIFTY&lang={lang}", "Stock",
+         "<path d='M7 18V8m5 10V4m5 14v-6'/>"),
+        ("orb", f"/orb?lang={lang}", "ORB",
+         "<path d='M3 17l6-6 4 4 8-8'/><path d='M14 7h7v7'/>"),
+        ("levels", f"/levels?lang={lang}", "Levels",
+         "<path d='M4 6h16M4 12h16M4 18h16'/>"),
+        ("chain", f"/chain?lang={lang}", "Chain",
+         "<rect x='3' y='4' width='18' height='16' rx='2'/><path d='M12 4v16M3 10h18'/>"),
+        ("paper", f"/paper?lang={lang}", "Paper",
+         "<rect x='2' y='5' width='20' height='14' rx='2'/><path d='M2 10h20'/>"),
+    )
+    links = "".join(
+        f"<a href='{href}' class='{'on' if active == key else ''}'>"
+        f"<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'>{svg}</svg>"
+        f"<span>{label}</span></a>"
+        for key, href, label, svg in items
+    )
+    return f"<nav class='bottom-nav' aria-label='Mobile navigation'>{links}</nav>"
+
+
 def _page(lang: str, title: str, body: str, head_extra: str = "", scripts: str = "",
           live: bool = False, active: str = "") -> str:
-    """Page shell. ``live=True`` adds the LIVE indicator + auto-refresh
-    engine (chart pages only — static pages never claim to be live).
-    The header is a professional tab bar (segmented control, active
-    tab highlighted) — never plain text links."""
+    """Page shell. Default theme is white/light (`data-theme="light"`),
+    with instant dark toggle persisted in localStorage. ``live=True`` adds
+    the LIVE indicator + auto-refresh engine (chart pages only)."""
     t = lambda k: i18n_mod.t(k, lang)
     live_html = ""
     if live:
@@ -245,15 +284,12 @@ padding:4px 10px;color:var(--text);text-decoration:none}}
 .chart-wrap{{position:relative;width:100%}}
 .chart-box{{width:100%;height:300px}}
 .chart-box.tall{{height:420px}}
-.news-item{{border-left:3px solid var(--accent);padding:8px 12px;margin:8px 0;
-background:var(--card)}}
-.theme-btn{{float:right;background:var(--card);color:var(--text);
-border:1px solid var(--border);border-radius:8px;padding:4px 10px;cursor:pointer}}
+.news-item{{border-left:3px solid var(--accent);padding:8px 12px;margin:8px 0;background:var(--card)}}
+.theme-btn{{float:right;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:4px 10px;cursor:pointer}}
 .sector-bar{{height:10px;border-radius:5px;background:var(--up)}}
 .sector-bar.down{{background:var(--down)}}
 .index-cards{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}}
-.icard{{background:var(--card);border:1px solid var(--upmid);border-radius:4px;position:relative;
-height:76px;overflow:hidden}}
+.icard{{background:var(--card);border:1px solid var(--upmid);border-radius:4px;position:relative;height:76px;overflow:hidden}}
 .icard.neg{{border-color:var(--downmid)}}
 .icard .spark{{position:absolute;left:0;top:0;width:100%;height:46px}}
 .icard .lab{{position:absolute;left:6px;top:4px;background:rgba(255,255,255,.92);padding:2px 6px 3px;border-radius:3px;z-index:2}}
@@ -321,45 +357,46 @@ a.icard{{display:block}}
 .foot{{color:var(--muted);font-size:10.5px;text-align:center;padding:0 0 14px}}
 .divider{{height:1px;background:#d9dee6;margin:8px 0 6px}}
 </style><link rel="stylesheet" href="/static/terminal.css">{head_extra}</head>
-<body><div id="ml-disc"><b>Paper trading only · not investment advice.</b> Market feeds may be delayed.</div>
-<div class='ml-top'><h1>Bhanu Indian Day Trader</h1><span class='sp'></span><time class='session-clock' id='session-clock'></time><span class='paper-mode'>Paper terminal</span><button aria-label='Toggle light or dark theme' class="theme-btn" onclick="bhanuTheme()">Theme</button></div>
+<body><div id="ml-disc"><b>Paper trading only · not investment advice.</b> Real NSE/Yahoo feeds; when market is closed, prices stay frozen.</div>
+<div class='ml-top'><span class='brand-mark'>BT</span><h1>Bhanu Indian Day Trader</h1><span class='sp'></span>
+<time class='session-clock' id='session-clock'></time>
+<span class='market-badge' id='market-status-badge'><span class='dot'></span> Checking…</span>
+<a href='/bot?lang={lang}' class='hdr-icon-btn' title='Bhanu Auto-Scan Bot'>🤖 Bot</a>
+<button type='button' class='hdr-icon-btn' onclick="BhanuPro.openModal('alerts')" title='Smart Price Alerts' aria-label='Alerts'>🔔</button>
+<button type='button' class='hdr-icon-btn' onclick="BhanuPro.openModal('learn')" title='Hinglish Learning Hub &amp; Replay' aria-label='Learn'>🎓</button>
+<span class='paper-mode'>Paper terminal</span>
+<button type='button' aria-label='Toggle light or dark theme' class='theme-btn' onclick='bhanuTheme()'><span id='pro-theme-icon'>🌙</span> <span id='pro-theme-label'>Dark</span></button></div>
 <div class='nav-strip'>{nav}</div>
 <main><h2>{_esc(title)}</h2>{live_html}{body}</main>
 <p class="foot">Paper trading only — no real orders. Educational software, not investment advice.</p>
+{_modals_html()}
+{_bottom_nav_html(lang, active)}
 <script>
-const marketClock=new Intl.DateTimeFormat('en-GB',{{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit'}});
-function paintClock(){{document.getElementById('session-clock').textContent=marketClock.format(new Date())+' IST';}}
-paintClock();setInterval(paintClock,1000);
 document.querySelectorAll('.lang a').forEach(a=>{{
   const u=new URL(location.href);u.searchParams.set('lang',new URL(a.href).searchParams.get('lang'));a.href=u.href;
 }});
 function bhanuTheme(){{
+  if(window.BhanuPro&&typeof window.BhanuPro.toggleTheme==='function'){{window.BhanuPro.toggleTheme();return;}}
   var h=document.documentElement;
   var next=h.getAttribute('data-theme')==='dark'?'light':'dark';
   h.setAttribute('data-theme',next);
-  if(window.bhanuChartOpts){{const o=bhanuChartOpts();for(const st of [...Object.values(window.bhanuLines||{{}}),...Object.values(window.bhanuCandles||{{}})]){{if(st.chart)st.chart.applyOptions({{layout:o.layout,grid:o.grid}});}}}}
   try{{localStorage.setItem('bhanu-theme',next);}}catch(e){{}}
 }}
-try{{var s=localStorage.getItem('bhanu-theme');
-if(s){{document.documentElement.setAttribute('data-theme',s);}}}}catch(e){{}}
+try{{var s=localStorage.getItem('bhanu-theme');if(s){{document.documentElement.setAttribute('data-theme',s);}}}}catch(e){{}}
 </script>
+<script src="/static/pro_terminal.js" defer></script>
 {scripts}
 </body></html>"""
 
 
 def _chart_json(payload) -> str:
-    """JSON for embedding in a page — `</` escaped so it can never close
-    its own <script> tag."""
+    """JSON for embedding in a page — `</` escaped."""
     return json.dumps(payload, default=str).replace("</", "<\\/")
 
 
 def _static_file(name: str) -> tuple[bytes, str] | None:
-    """Serve one bundled static file (exact name only — no traversal).
-
-    Returns ``(bytes, content_type)`` or ``None`` when the name is not
-    an allowed static file or the file is missing.
-    """
-    if name not in (CHART_LOCAL, "terminal.css"):
+    """Serve one bundled static file (exact allow-list only — no traversal)."""
+    if name not in (CHART_LOCAL, "terminal.css", "pro_terminal.js"):
         return None
     path = ROOT / "web" / "static" / name
     try:
@@ -377,15 +414,8 @@ def _chart_lib_tag() -> str:
 
 
 def _live_js() -> str:
-    """Slow-sync engine for chart pages (flow, sectors, news, ORB).
-
-    Every LIVE_REFRESH_MS each registered refresher (a function returning
-    a Promise) re-fetches its section data and updates it in place —
-    no page reload, no flicker. Ticks are skipped while the tab is hidden
-    or a refresh is already in flight; returning to a visible tab
-    refreshes immediately. A failed tick keeps the old data on screen and
-    the indicator says "update failed, retrying…" with the last good time.
-    """
+    """Slow-sync engine for chart pages (flow, sectors, news, ORB),
+    with market-closed freeze support."""
     return """<script>
 var BHANU_REFRESH_MS = __LIVE_MS__;
 window.bhanuRefreshers = window.bhanuRefreshers || [];
@@ -395,14 +425,9 @@ function bhanuLiveTime(){
   catch(e){return new Date().toLocaleTimeString();}
 }
 function bhanuLiveClock(){
-  // 1-second ticking clock: the LIVE line moves every second so the
-  // page never looks frozen while it waits for the next 2-second
-  // data tick. Only runs after the first successful data load
-  // (data-last set) — before that the indicator says "loading…".
-  // The clock shows the current time; "data HH:MM:SS" shows when
-  // data last actually arrived.
   var el=document.getElementById('bhanu-live-indicator');
   if(!el){return;}
+  if(document.body.classList.contains('is-market-closed')){return;}
   if(!el.getAttribute('data-last')){return;}
   if(el.getAttribute('data-failed')==='1'){return;}
   el.innerHTML='<span class="dot"></span> Dashboard · '+bhanuLiveTime()+' · data received '+el.getAttribute('data-last');
@@ -410,6 +435,7 @@ function bhanuLiveClock(){
 function bhanuLiveSet(state){
   var el=document.getElementById('bhanu-live-indicator');
   if(!el){return;}
+  if(document.body.classList.contains('is-market-closed')){return;}
   if(state==='ok'){
     el.setAttribute('data-last',bhanuLiveTime());
     el.removeAttribute('data-failed');
@@ -421,7 +447,7 @@ function bhanuLiveSet(state){
   }
 }
 function bhanuLiveTick(){
-  if(document.hidden){return;}
+  if(document.hidden||document.body.classList.contains('is-market-closed')){return;}
   if(window.bhanuLiveInFlight){return;}
   if(!window.bhanuRefreshers.length){return;}
   window.bhanuLiveInFlight=true;
@@ -443,15 +469,9 @@ function bhanuMarkLive(){
 function bhanuStartLive(){
   var ind=document.getElementById('bhanu-live-indicator');
   if(!ind){return;}
-  // Do NOT claim an update yet — the first data load marks it live
-  // (bhanuMarkLive) when it actually succeeds.
   ind.innerHTML='<span class="dot"></span> LIVE · loading…';
   setInterval(bhanuLiveTick, BHANU_REFRESH_MS);
-  // The clock ticks every second (see bhanuLiveClock) — the page
-  // never looks frozen between 2-second data ticks.
   setInterval(bhanuLiveClock, 1000);
-  // First refresh cycle shortly after load, so charts that just
-  // finished their initial load also get a prompt 60s-cycle tick.
   setTimeout(bhanuLiveTick, 5000);
   document.addEventListener('visibilitychange',function(){
     if(!document.hidden){bhanuLiveTick();}
@@ -462,16 +482,7 @@ bhanuStartLive();
 
 
 def _chart_js() -> str:
-    """Shared chart helpers: line chart, candlestick + overlays, flow, sectors.
-
-    Every renderer checks for the chart library first (bundled locally
-    at /static/lightweight-charts.js); when it cannot load, a built-in
-    SVG line/candlestick chart is drawn instead — a chart box is never
-    left blank. When the data is missing the card says so honestly.
-    Lazy loaders (bhanuLazyLine / bhanuLazyCandle) fetch from /api/* on
-    page open, retry with backoff on failure, and mark the LIVE
-    indicator when data actually arrives.
-    """
+    """Shared chart helpers: line chart, candlestick + overlays, flow, sectors."""
     return """<script>
 window.bhanuRefreshers = window.bhanuRefreshers || [];
 window.bhanuLines = window.bhanuLines || {};
@@ -501,25 +512,16 @@ function bhanuSvgLine(el, points, color){
   var d=points.map(function(p,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(p.value).toFixed(1);}).join(' ');
   var last=points[points.length-1].value;
   el.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Price chart (simple view)"><path d="'+d+'" fill="none" stroke="'+(color||'#2563eb')+'" stroke-width="2"/><circle cx="'+X(points.length-1)+'" cy="'+Y(last)+'" r="4" fill="'+(color||'#2563eb')+'"/><text x="'+(W-8)+'" y="18" text-anchor="end" font-size="13" font-weight="bold" fill="'+(bhanuDark()?'#fff':'#111')+'">'+last.toLocaleString('en-IN')+'</text></svg><p class="muted">Simple chart view — full chart library could not load.</p>';
-  // Keep handles so the last point can move in place (bhanuSvgLineLast)
-  // instead of rebuilding the whole SVG on every tick.
   el._bhanuPath=el.querySelector('path');
   el._bhanuDot=el.querySelector('circle');
   el._bhanuText=el.querySelector('text');
   el._bhanuPoints=points;
   el._bhanuX=X;
   el._bhanuY=Y;
-  // Clamp bounds for the in-place last-point move: a tick outside
-  // the initial min/max (common in a trending move) must pin the
-  // dot to the chart edge, never fly off the canvas until the
-  // 5-minute rebase re-scales the range.
   el._bhanuPad=pad;
   el._bhanuH=H;
 }
 function bhanuSvgLineLast(el, v){
-  // Move only the last point of an existing SVG line chart — the
-  // path's last segment, the dot and the price label. No innerHTML
-  // rebuild, so the chart never flickers or jumps on a tick.
   if(!el||!el._bhanuPath||!el._bhanuPoints||!el._bhanuPoints.length){return;}
   var pts=el._bhanuPoints;
   pts[pts.length-1].value=v;
@@ -535,11 +537,7 @@ function bhanuSvgLineLast(el, v){
 }
 function bhanuEase(t){return t<0.5?2*t*t:1-Math.pow(-2*t+2,2)/2;}
 function bhanuAnimLast(id, symbol, fromVal, toVal, time){
-  // Glide the chart's last point from the old price to the new one
-  // (~0.9 s ease) instead of jumping in one step: the line flows
-  // instead of stopping for 2 s and then stepping. One animation per
-  // chart — a newer tick cancels the older one. The header price
-  // glides along too, so the card never looks frozen either.
+  if(document.body.classList.contains('is-market-closed')){return;}
   var st=window.bhanuLines[id];if(!st){return;}
   if(fromVal===toVal){return;}
   var slug={'^NSEI':'nsei','^NSEBANK':'nsebank','^BSESN':'bsesn'}[symbol];
@@ -547,7 +545,7 @@ function bhanuAnimLast(id, symbol, fromVal, toVal, time){
   var raf=window.requestAnimationFrame||function(fn){return setTimeout(function(){fn(Date.now());},16);};
   var start=null;
   function frame(ts){
-    if(st.animToken!==token){return;}
+    if(document.body.classList.contains('is-market-closed')||st.animToken!==token){return;}
     if(start===null){start=ts;}
     var k=Math.min(1,(ts-start)/900);
     var v=fromVal+(toVal-fromVal)*bhanuEase(k);
@@ -580,9 +578,6 @@ function bhanuSvgCandles(el, candles){
   el.innerHTML=s;
 }
 function bhanuSvgFlow(el, series){
-  // Spaghetti chart: every stock's intraday % move since the open —
-  // green above zero, red below, NIFTY dashed blue. Sector labels on
-  // the left sit at each sector's median last move.
   if(!series||!series.length){bhanuUnavailable(el,'no flow data');return;}
   var W=960,H=560,padL=64,padR=8,padT=10,padB=26;
   var mn=0,mx=0;
@@ -618,7 +613,7 @@ function bhanuSvgFlow(el, series){
     var y=Y(l.v);
     if(y-lastY<14){return;}
     lastY=y;
-    s+='<text x="4" y="'+(y+3.5).toFixed(1)+'" font-size="10" font-weight="700" fill="#141a26">'+l.name.toUpperCase()+'</text>';
+    s+='<text x="4" y="'+(y+3.5).toFixed(1)+'" font-size="10" font-weight="700" fill="'+(bhanuDark()?'#e2e8f0':'#141a26')+'">'+l.name.toUpperCase()+'</text>';
   });
   var nif=series.filter(function(x){return x.is_index;})[0];
   if(nif){var lv=nif.line[nif.line.length-1].value;s+='<text x="'+(W-padR)+'" y="'+(Y(lv)-6).toFixed(1)+'" text-anchor="end" font-size="11" font-weight="700" fill="#2563eb">NIFTY '+(lv>=0?'+':'')+lv.toFixed(2)+'%</text>';}
@@ -626,7 +621,6 @@ function bhanuSvgFlow(el, series){
   el.innerHTML=s;
 }
 function bhanuWaterfall(el, series){
-  // Strongest / weakest tiles with mini sparklines (right of spaghetti).
   if(!series||!series.length){el.innerHTML='';return;}
   var sorted=series.slice().filter(function(s){return !s.is_index;}).sort(function(a,b){return b.change_pct-a.change_pct;});
   function tile(s, rank){
@@ -647,7 +641,6 @@ function bhanuWaterfall(el, series){
   el.innerHTML=html;
 }
 function bhanuSpark(id, points){
-  // Tiny sparkline for an index tile: one thin line, no axes.
   var el=document.getElementById(id);if(!el||!points||points.length<2){return;}
   var pts=points.slice(-120);
   var W=300,H=46,pad=2;
@@ -676,8 +669,6 @@ async function bhanuDetail(url){
   throw Error('Detail feed timed out');
 }
 function bhanuFetchJson(url, timeoutMs){
-  // fetch() with a timeout: a hung request must surface as an error
-  // (so the retry loop runs) instead of leaving "loading" forever.
   if(typeof AbortController==='undefined'){
     return fetch(url).then(function(r){
       if(!r.ok){throw new Error('http '+r.status);}return r.json();
@@ -700,12 +691,14 @@ function bhanuTickLabel(el){
   const age=Date.now()/1000-stamp;
   const date=new Date(stamp*1000);
   const formatted=date.toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false,timeZone:'Asia/Kolkata'});
-  el.textContent='2 s poll · '+(age>=0&&age<120?'Recent tick':'Last known tick')+' · '+formatted+' IST';
+  const prefix=document.body.classList.contains('is-market-closed')?'Market Closed · Last tick':'2 s poll · '+(age>=0&&age<120?'Recent tick':'Last known tick');
+  el.textContent=prefix+' · '+formatted+' IST';
 }
 function bhanuFeedStatus(){
   document.querySelectorAll('[data-tick]').forEach(bhanuTickLabel);
   const badge=document.getElementById('index-feed-state');
   if(!badge)return;
+  if(document.body.classList.contains('is-market-closed')){badge.textContent='Market Closed · Frozen';return;}
   const allRecent=['chart-nifty-stamp','chart-bank-stamp'].every(id=>{
     const el=document.getElementById(id),age=el?Date.now()/1000-Number(el.dataset.tick):Infinity;
     return age>=0&&age<120;
@@ -714,10 +707,7 @@ function bhanuFeedStatus(){
 }
 bhanuFeedStatus();setInterval(bhanuFeedStatus,2000);
 function bhanuLiveLineTick(id, symbol){
-  // One live tick: fetch the latest price and glide the line's end
-  // to it in place (bhanuAnimLast) — never a full re-fetch, never a
-  // jump. When the market clock advanced, the new bar starts at the
-  // old value and glides to the new one.
+  if(document.body.classList.contains('is-market-closed')){return Promise.resolve();}
   var st=window.bhanuLines[id];if(!st){return Promise.reject(new Error('no line'));}
   return bhanuFetchJson('/api/live?symbol='+encodeURIComponent(symbol)).then(function(p){
     if(!p||p.error||p.ltp===null||p.ltp===undefined){throw new Error(p&&p.error?p.error:'no live data');}
@@ -744,12 +734,10 @@ function bhanuLiveLineTick(id, symbol){
   });
 }
 function bhanuStartLiveLine(id, symbol){
-  // A line chart ticks every 2 seconds once it has drawn. Every 150th
-  // tick (~5 minutes) it quietly rebases to fresh 5m bars, so the
-  // 1-minute live tail never drifts from the real candles.
   if(!symbol||window.bhanuLiveTimers[id]){return;}
   var ticks=0;
   var run=function(){
+    if(document.body.classList.contains('is-market-closed')){return;}
     ticks++;
     if(ticks%150===0){
       bhanuFetchJson('/api/intraday?symbol='+encodeURIComponent(symbol)).then(function(p2){
@@ -780,8 +768,6 @@ function bhanuLineRender(id, p, symbol){
   var lastVal=p.line[p.line.length-1].value;
   bhanuSparkFor(symbol,p.line);
   if(typeof LightweightCharts==='undefined'){
-    // One array object for both the state and the SVG refs, so the
-    // in-place last-point update sees the same points.
     var line=p.line.slice();
     bhanuSvgLine(el,line,p.color||'#2563eb');
     window.bhanuLines[id]={el:el,series:null,line:line,lastTime:lastTime,lastValue:lastVal,color:p.color||'#2563eb'};
@@ -825,10 +811,6 @@ function bhanuLazyLine(id, symbol){
   });
 }
 function bhanuFlowRender(id, p){
-  // The reference chart is a hand-drawn SVG spaghetti (thin green/red
-  // lines, dashed blue NIFTY) — it renders instantly with zero chart
-  // library load, exactly like the copy's engine already does. The
-  // waterfall tiles on the right rank strongest / weakest.
   var el=document.getElementById(id);if(!el)return false;
   bhanuSvgFlow(el,p.series);
   var up=0,down=0;
@@ -837,6 +819,8 @@ function bhanuFlowRender(id, p){
   if(leg){leg.textContent=up+' up / '+down+' down — each line is one stock\\'s intraday % change (NIFTY = blue dashed). Failed: '+(p.failed?p.failed.length:0)+'. As of '+p.as_of+'.';}
   var cnt=document.getElementById(id+'-counts');
   if(cnt){cnt.innerHTML='<span class="up">▲ BULLISH <b>'+up+'</b></span><span class="down">▼ BEARISH <b>'+down+'</b></span>';}
+  var mAdv=document.getElementById('mood-adv-dec');
+  if(mAdv){mAdv.innerHTML='<span class="up">'+up+'</span> / <span class="down">'+down+'</span>';}
   var wf=document.getElementById(id+'-waterfall');
   if(wf){bhanuWaterfall(wf,p.series);}
   return true;
@@ -857,9 +841,6 @@ function bhanuFlowChart(id){
   }).catch(function(e){bhanuUnavailable(el,'could not load flow data');});
 }
 function bhanuSectorRender(id, p){
-  // Horizon view: pale green above the NIFTY line, pale pink below it.
-  // Dashed blue NIFTY line, bubbles sized by traded value, RUNNING
-  // badge on sectors beating NIFTY by >1%. Ranked rows on the right.
   var el=document.getElementById(id);if(!el)return false;
   var W=960,H=620,padL=40,padR=16,padT=16,padB=44;
   var nifty=p.nifty_change===null||p.nifty_change===undefined?0:p.nifty_change;
@@ -887,7 +868,6 @@ function bhanuSectorRender(id, p){
     var top=s.top_member||(s.members&&s.members[0])||'';
     svg+='<a href="/stock?symbol='+encodeURIComponent(top)+'&lang='+bhanuLang()+'" style="cursor:pointer"><title>'+s.name+' — top stock '+top+' — detail page kholo</title>';
     if(s.rel_pct!==null&&s.rel_pct>1){
-      svg+='<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="'+r.toFixed(1)+'" fill="none" stroke="'+col+'" stroke-width="2"><animate attributeName="r" values="'+r.toFixed(1)+';'+(r+12).toFixed(1)+'" dur="1.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.9;0" dur="1.6s" repeatCount="indefinite"/></circle>';
       svg+='<text x="'+cx.toFixed(1)+'" y="'+(cy-r-8).toFixed(1)+'" text-anchor="middle" font-size="9" font-weight="800" fill="'+col+'">RUNNING</text>';
     }
     svg+='<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="'+r.toFixed(1)+'" fill="'+col+'" fill-opacity="0.55" stroke="'+col+'" stroke-width="2"/>';
@@ -986,11 +966,6 @@ function bhanuIndicators(id,st){
   if(label)label.textContent=['Last bar '+barTime+' IST',ema.length?'EMA 20':'EMA 20 needs 20 bars',p.vwap&&p.vwap.length?'VWAP':'VWAP unavailable',vol.length?'Reported volume':'Volume unavailable'].join(' · ');
 }
 function bhanuCandleApplyOverlays(id){
-  // Rebuild every overlay from st.payload + st.overlays (the toggle
-  // state). Price lines are never toggled — entry/SL/TP/levels always
-  // show — but each line's axis label follows its label_visible flag
-  // (the server hides the label of the lower-priority line when two
-  // sit close enough to overlap, e.g. PDL vs TP).
   var st=(window.bhanuCandles||{})[id];
   if(!st||!st.payload){return;}
   bhanuIndicators(id,st);
@@ -1192,7 +1167,7 @@ function bhanuQuoteFetch(){
       var ce=document.getElementById('q-'+slug+'-chg');
       var ve=document.getElementById('q-'+slug+'-prev');
       const state=document.getElementById('q-'+slug+'-status');
-      if(state)state.textContent=q.error||'Last reported · source time unverified';
+      if(state)state.textContent=q.error||(document.body.classList.contains('is-market-closed')?'Market Closed · Last close':'Last reported · source time unverified');
       if(q.price===null||q.price===undefined){
         if(pe)pe.textContent='data unavailable';
         if(ce)ce.textContent='—';
@@ -1225,8 +1200,6 @@ function bhanuQuoteRefresh(){
       if(pe){pe.textContent='data unavailable';}
     });
   });
-  // Quotes tick every 2 seconds too — the price on the card moves
-  // while you watch, it does not wait for the 60-second cycle.
   if(!window.bhanuQuoteTimer){
     window.bhanuQuoteTimer=setInterval(function(){
       bhanuQuoteFetch().catch(function(){});
@@ -1365,6 +1338,7 @@ function bhanuOrbLoad(querySymbol){
   var symEl=document.getElementById('orb-chart-symbol');
   var pick=function(sym){
     if(!sym){return;}
+    window.bhanuOrbSymbol=sym;
     if(symEl){symEl.textContent='Chart symbol: '+sym+' — 5m candles, VWAP, order blocks, S/R.';}
     bhanuLazyCandle('orb-chart','/api/orbchart?symbol='+encodeURIComponent(sym));
     bhanuOrbBreakdown(sym);
@@ -1395,6 +1369,7 @@ function bhanuLevelsLoad(querySymbol){
   var symEl=document.getElementById('levels-chart-symbol');
   var pick=function(sym){
     if(!sym){return;}
+    window.bhanuLevelsSymbol=sym;
     if(symEl){symEl.textContent='Chart symbol: '+sym+' — 5m candles, VWAP, order blocks, S/R.';}
     bhanuLazyCandle('levels-chart','/api/levelschart?symbol='+encodeURIComponent(sym));
     bhanuLevelsBreakdown(sym);
@@ -1451,17 +1426,7 @@ function bhanuSkillsLoad(){
 
 def _line_chart_block(chart_id: str, label: str, yahoo_symbol: str,
                       height: int = 260) -> str:
-    """A line-chart card, loaded lazily: the page renders instantly
-    with a "loading" state and ``bhanuLazyLine`` fetches the data from
-    /api/intraday — no Yahoo fetch ever blocks a page render.
-
-    NOTE: the card carries NO inline <script>. The ``bhanuLazyLine``
-    call lives in the page's scripts section, AFTER ``_chart_js()``
-    defines it. An inline call here used to execute during parsing,
-    before the function existed — a ReferenceError, so the fetch never
-    started and the card sat on "Chart load ho raha hai…" forever
-    while the rest of the page worked (that exact bug left the 3 home
-    intraday charts blank)."""
+    """Lazy line-chart card (no inline script — loader runs after _chart_js)."""
     cached_tick = (poller_mod.get_spark(yahoo_symbol) or {}).get("time") or 0
     return (
         f"<div class='card'><h3>{_esc(label)} — intraday</h3>"
@@ -1472,14 +1437,10 @@ def _line_chart_block(chart_id: str, label: str, yahoo_symbol: str,
     )
 
 
-def _candle_chart_block(chart_id: str, symbol: str, note: str | None = None) -> str:
-    """A candlestick + overlays card, loaded lazily: the page renders
-    instantly with a "loading" state and the page loader
-    (``bhanuOrbLoad`` / ``bhanuLevelsLoad`` / ``bhanuStockLoad``)
-    fetches the data from /api/orbchart, /api/levelschart or
-    /api/stock — no Yahoo fetch ever blocks a page render. ``symbol``
-    is the chart symbol when known from the URL, else '' (the loader
-    fills it in from the scan)."""
+def _candle_chart_block(chart_id: str, symbol: str, note: str | None = None,
+                        tf_page: str | None = None) -> str:
+    """Lazy candlestick + overlays card, with optional 5m/10m/15m/1h
+    mobile-friendly timeframe switcher for ORB and Levels pages."""
     heading = (
         f"{_esc(symbol)} — candlestick with overlays"
         if symbol else "Candlestick with overlays"
@@ -1489,8 +1450,25 @@ def _candle_chart_block(chart_id: str, symbol: str, note: str | None = None) -> 
         "support / resistance. Green box = target zone, red box = stop zone, "
         "pale boxes = order blocks / fair value gaps. Arrows = CHoCH / BOS breaks."
     )
+    tf_html = ""
+    if tf_page in ("orb", "levels"):
+        sym_expr = (
+            "window.bhanuOrbSymbol||'NIFTY'"
+            if tf_page == "orb"
+            else "window.bhanuLevelsSymbol||'NIFTY'"
+        )
+        btns = "".join(
+            f"<button type='button' class='tfbtn{' on' if iv == '5m' else ''}' "
+            f"onclick=\"BhanuPro.switchTimeframe('{tf_page}',{sym_expr},'{iv}',this)\">{label}</button>"
+            for iv, label in (("5m", "5m"), ("15m", "15m"), ("1H", "1h"), ("D", "D"))
+        )
+        tf_html = (
+            f"<div class='tf-toolbar'><div class='tf-group'>{btns}</div>"
+            f"<span class='muted mono' style='font-size:11px'>Support / Resistance · Entry / SL / TP</span></div>"
+        )
     return (
         f"<div class='card'><h3>{heading}</h3>"
+        f"{tf_html}"
         f"<p class='muted'>{note_html}</p><p class='feed-stamp' id='{chart_id}-indicators'>Indicators awaiting candles</p>"
         f"<div id='{chart_id}-wrap' class='chart-wrap'>"
         f"<div id='{chart_id}' class='chart-box tall'>"
@@ -1499,10 +1477,7 @@ def _candle_chart_block(chart_id: str, symbol: str, note: str | None = None) -> 
 
 
 def _mc_histogram_svg(hist: dict) -> str:
-    """Monte Carlo distribution as server-side SVG bars (works offline).
-
-    Five R buckets with counts + % labels, and a marker for the average R.
-    """
+    """Monte Carlo distribution bars (works offline)."""
     buckets = hist.get("buckets", [])
     n = hist.get("n", 0)
     avg_r = hist.get("avg_r")
@@ -1537,14 +1512,7 @@ def _mc_histogram_svg(hist: dict) -> str:
 
 
 def _index_cards_html(lang: str = "hi") -> str:
-    """Three index cards (NIFTY / BANK NIFTY / SENSEX) in the reference
-    tile style: 76px tile, sparkline on top, label overlay, price +
-    change in the foot. Filled in lazily by ``bhanuQuoteFetch``
-    (/api/quotes) and the 5s live-line ticks, which also draw each
-    card's sparkline from the same /api/live line. Cell ids:
-    ``q-<slug>-price`` / ``q-<slug>-chg`` / ``q-<slug>-prev`` /
-    ``q-<slug>-spark`` / ``q-<slug>-card``. Each card links to that
-    index's /stock detail page."""
+    """Three index cards (NIFTY / BANK NIFTY / SENSEX)."""
     cards = ""
     for _symbol, label, slug, name in (
         ("^NSEI", "NIFTY 50", "nsei", "NIFTY"),
@@ -1564,14 +1532,7 @@ def _index_cards_html(lang: str = "hi") -> str:
 
 
 def _news_feed_html(lang: str, news: dict | None = None) -> str:
-    """Prominent news feed section (automatic, real-time).
-
-    Each headline is a card row with source + time and a "Real-time
-    check" label. Used on home and /skills. A failed fetch shows an
-    honest "unavailable" — never an empty or fake feed. When the live
-    engine has a warmed news check, pass it in (``news``) so the page
-    never waits on a fresh fetch.
-    """
+    """Prominent real-time news feed section."""
     t = lambda k: i18n_mod.t(k, lang)
     if news is None and poller_mod.is_running():
         return f"<div class='card'><h3>{t('news_feed')}</h3><p class='loading'>News feed warming up…</p></div>"
@@ -1585,8 +1546,6 @@ def _news_feed_html(lang: str, news: dict | None = None) -> str:
             )
     latest = news.get("latest", [])[:8]
     sources = news.get("sources", {}) or {}
-    # The Marketaux note already starts with "Marketaux: ..." — strip
-    # that prefix so the line does not read "Marketaux: Marketaux: ...".
     mx_status = sources.get('marketaux', 'unavailable')
     if mx_status.startswith("Marketaux: "):
         mx_status = mx_status[len("Marketaux: "):]
@@ -1627,9 +1586,7 @@ def _news_feed_html(lang: str, news: dict | None = None) -> str:
 
 
 def _orb_table_html(result: dict, lang: str, limit: int = 50) -> str:
-    """ORB hits table card from a scan ``result`` (shared by /api/orb
-    and the home page's top-10 — ``limit`` controls how many rows)."""
-    t = lambda k: i18n_mod.t(k, lang)
+    """ORB hits table card."""
     hits = result.get("hits", [])[:limit]
     failed = result.get("failed", [])
 
@@ -1641,7 +1598,8 @@ def _orb_table_html(result: dict, lang: str, limit: int = 50) -> str:
         except (KeyError, TypeError, ValueError):
             tps = "—"
         return (
-            f"<tr><td>{_esc(h.get('symbol', ''))}</td><td>{_opt(h.get('direction', ''))}</td>"
+            f"<tr><td><a href='/stock?symbol={_esc(h.get('symbol', ''))}&lang={lang}'>"
+            f"<b>{_esc(h.get('symbol', ''))}</b></a></td><td>{_opt(h.get('direction', ''))}</td>"
             f"<td>{_esc(h.get('close', ''))}</td><td>{_esc(h.get('bar_time', ''))}</td>"
             f"<td>{_esc(h.get('range_high', ''))} – {_esc(h.get('range_low', ''))}</td>"
             f"<td>{tps}</td></tr>"
@@ -1684,10 +1642,7 @@ def _orb_table_html(result: dict, lang: str, limit: int = 50) -> str:
 def _breakdown_for(lang: str, symbol: str, direction: str, entry: float,
                    stop: float, target: float, support=None, resistance=None,
                    trigger_time=None, yahoo_symbol=None) -> str:
-    """Signal breakdown card HTML for one setup — news, Time Machine
-    and volume vote on the entry, not just the price action. Served
-    lazily via /api/orbbreakdown and /api/levelsbreakdown so the
-    (potentially slow) news/bars/MC fetches never block a page."""
+    """Signal breakdown card HTML for one setup."""
     try:
         sig = _entry_signal_for(
             symbol, direction, entry, stop, target,
@@ -1695,7 +1650,7 @@ def _breakdown_for(lang: str, symbol: str, direction: str, entry: float,
             trigger_time=trigger_time, yahoo_symbol=yahoo_symbol,
         )
         return _signal_breakdown_html(sig)
-    except Exception as exc:  # noqa: BLE001 - a failed breakdown never blocks the page
+    except Exception as exc:  # noqa: BLE001
         return (
             "<div class='card'><h3>Signal breakdown</h3>"
             f"<p>Unavailable — {_esc(exc)}</p></div>"
@@ -1703,14 +1658,8 @@ def _breakdown_for(lang: str, symbol: str, direction: str, entry: float,
 
 
 def home(lang: str) -> str:
-    """Home page — renders INSTANTLY from local data only (paper
-    summary). Index quotes, intraday charts, flow, sector map, news,
-    ORB hits, robot status, levels and Time Machine summaries all load
-    lazily from /api/* after the page — no fetch ever blocks a page
-    render. Each section shows a "loading" state until its data
-    arrives; a failed fetch shows an honest message, never a blank box.
-    The live engine keeps every section warm in the background, so a
-    repeat visit shows data at once."""
+    """Home page — renders INSTANTLY with Market Mood strip + all 8 sections
+    in exact order, loading real NSE data lazily from /api/*."""
     t = lambda k: i18n_mod.t(k, lang)
     today = datetime.now(IST).date()
     try:
@@ -1724,10 +1673,25 @@ def home(lang: str) -> str:
     except Exception as exc:  # noqa: BLE001
         paper_html = f"<p>{t('paper_trading')}: unavailable ({_esc(exc)})</p>"
 
-    # (a) Index intraday charts — lazy, one card per index. The loader
-    # calls are appended to the scripts section (after _chart_js()
-    # defines bhanuLazyLine) — never inline in the card body, or the
-    # call runs before the function exists (see _line_chart_block).
+    mood_html = (
+        "<div class='mood-strip'>"
+        "<div class='mood-top'>"
+        "<div style='display:flex;align-items:center;gap:8px;flex-wrap:wrap'>"
+        "<span class='pill' id='mood-status-badge'>CHECKING MARKET…</span>"
+        "<span class='muted' id='mood-guidance' style='font-size:12px'>Real-time NSE breadth &amp; mood</span>"
+        "</div>"
+        "<div style='display:flex;gap:6px;flex-wrap:wrap'>"
+        f"<a href='/bot?lang={lang}' class='btn-ghost'>🤖 Auto-Scan Bot</a>"
+        "<button type='button' class='btn-ghost' onclick=\"BhanuPro.openModal('learn')\">🎓 Learn &amp; Replay</button>"
+        "</div></div>"
+        "<div class='mood-grid'>"
+        "<div class='mood-cell'><small>NIFTY 50</small><strong id='mood-nifty-chg' class='mono'>—</strong></div>"
+        "<div class='mood-cell'><small>BANK NIFTY</small><strong id='mood-bank-chg' class='mono'>—</strong></div>"
+        "<div class='mood-cell'><small>ADV / DEC</small><strong id='mood-adv-dec' class='mono'>—</strong></div>"
+        "<div class='mood-cell'><small>FLAT RULE</small><strong class='mono'>15:15 IST</strong></div>"
+        "</div></div>"
+    )
+
     chart_cards = ""
     lazy_calls = ""
     for yahoo_symbol, label in (("^NSEI", "NIFTY 50"), ("^NSEBANK", "BANK NIFTY"), ("^BSESN", "SENSEX")):
@@ -1735,13 +1699,10 @@ def home(lang: str) -> str:
         chart_cards += _line_chart_block(cid, label, yahoo_symbol)
         lazy_calls += f"bhanuLazyLine('{cid}', '{yahoo_symbol}');"
 
-    # (b) Smart Money — all stocks' intraday % change on one spaghetti
-    # chart, waterfall tiles on the right (strongest / weakest).
     flow_html = (
         "<div class='card' id='smartmoney'><div class='ml-h'>"
         "<h3>SMART MONEY</h3>"
-        "<span class='sub'>Tracked F&O stocks and indices · "
-        "intraday price change</span>"
+        "<span class='sub'>Tracked F&O stocks and indices · intraday price change</span>"
         "<span class='sp'></span>"
         "<a href='#sectormap'>Sector Map ↓</a>"
         "<span class='pill'>5 min scan</span></div>"
@@ -1749,52 +1710,44 @@ def home(lang: str) -> str:
         "<div class='counts' id='flow-chart-counts' style='display:flex;gap:16px'></div>"
         "<div id='flow-chart' style='height:560px'></div></div>"
         "<div class='sm-waterfall' id='flow-chart-waterfall'></div></div>"
-        "<p class='note'>Lines: every F&O stock's move since the open "
-        "(green above, red below), NIFTY dashed blue. Waterfall: every "
-        "stock now, strongest at the top, weakest at the bottom. "
-        "Flow refreshes every 5 minutes; upstream data can be delayed. "
-        "A technical screen, not advice.</p>"
+        "<p class='note'>Lines: every tracked NSE/F&O stock's move since the open "
+        "(green above, red below), NIFTY dashed blue. Waterfall: strongest at the top, "
+        "weakest at the bottom. A technical screen, not advice.</p>"
         "<p class='muted' id='flow-chart-legend'></p></div>"
     )
-    # (c) Sector Map horizon (lazy, same data as the flow).
     sector_html = (
         "<div class='card' id='sectormap'><div class='ml-h'>"
         "<h3>SECTOR MAP</h3>"
-        "<span class='sub'>Where the money is going — how each sector moves "
-        "against NIFTY, with size and momentum</span>"
+        "<span class='sub'>Where the money is going — how each sector moves against NIFTY</span>"
         "<span class='sp'></span>"
         "<a href='#smartmoney'>Smart money ↑</a>"
         "<span class='pill' id='index-feed-state' data-recent='LIVE · NSE indices polling · recent source ticks'>Waiting for source timestamps</span></div>"
         "<div class='hz-wrap'><div id='sector-map'></div>"
         "<div class='hz-side' id='sector-map-list'></div></div>"
-        "<p class='muted'><a href='/sectors'>Full sector page</a>.</p></div>"
+        f"<p class='muted'><a href='/sectors?lang={lang}'>Full sector page</a>.</p></div>"
     )
-    # (d) News feed (prominent section, real-time) — lazy.
-    news_html = (
-        f"<div id='news-feed'><div class='card'><h3>{t('news_feed')}</h3>"
-        f"<p class='loading'>News load ho raha hai…</p></div></div>"
-    )
-    # (e) ORB hits — lazy (top 10).
-    orb_html = (
-        "<div class='card' id='orb-hits'><h3>ORB Hits — today</h3>"
-        "<p class='loading'>ORB scan load ho raha hai…</p></div>"
-    )
-    # (f) Robot status — the live engine, in its own card (lazy).
     robot_html = (
         "<div id='robot-status'>"
         "<p class='loading'>Robot status load ho raha hai…</p></div>"
     )
-    # (g) Levels mini-summary — support/resistance at a glance (lazy).
+    news_html = (
+        f"<div id='news-feed'><div class='card'><h3>{t('news_feed')}</h3>"
+        f"<p class='loading'>News load ho raha hai…</p></div></div>"
+    )
+    orb_html = (
+        "<div class='card' id='orb-hits'><h3>ORB Hits — today</h3>"
+        "<p class='loading'>ORB scan load ho raha hai…</p></div>"
+    )
     levels_mini_html = (
         "<div class='card' id='levels-mini'><h3>Levels — indices</h3>"
         "<p class='loading'>Levels load ho raha hai…</p></div>"
     )
-    # (h) Time Machine mini-summary — today's setup + replay odds (lazy).
     tm_mini_html = (
         "<div class='card' id='tm-mini'><h3>Time Machine — today</h3>"
         "<p class='loading'>Time Machine load ho raha hai…</p></div>"
     )
     body = (
+        f"{mood_html}"
         f"<div class='card'><h3>{t('home')} — indices</h3>"
         f"{_index_cards_html(lang)}"
         f"{paper_html}"
@@ -1814,6 +1767,49 @@ def home(lang: str) -> str:
     )
 
 
+def bot_page(lang: str) -> str:
+    """Dedicated BHANU AUTO-SCAN BOT page with fixed side-by-side desktop
+    cards (BHANU AUTO-SCAN BOT on the left, AAJ KA BEST SETUP on the right —
+    zero shifting/collision) plus Top Scanned Setups below."""
+    body = (
+        "<div class='bot-split'>"
+        "<div class='card'>"
+        "<div class='ml-h'><h3>🤖 BHANU AUTO-SCAN BOT</h3><span class='sp'></span>"
+        "<span class='pill' id='bot-scan-status'>CHECKING…</span></div>"
+        "<p class='muted'>Poore NSE universe ko scan karke real-time best ORB + Levels + Volume + Time Machine setup nikalta hai.</p>"
+        "<div class='bot-live-ribbon'>"
+        "<div class='ribbon-left'><span class='bot-radar-dot'></span>"
+        "<span class='ribbon-text mono' id='bot-live-ticker'>Waiting for live scan status…</span></div>"
+        "<span class='badge mono' id='bot-scan-cycle'>SCAN #1</span></div>"
+        "<div style='display:flex;justify-content:space-between;font-size:11.5px;font-weight:700' class='mono'>"
+        "<span>Universe scan progress</span><span id='bot-scan-pct' class='up'>100%</span></div>"
+        "<div class='bot-scan-track'><div class='bot-scan-fill' id='bot-scan-fill' style='width:100%'></div></div>"
+        "<div class='metrics' style='margin:8px 0'>"
+        "<div><small>Symbols Scanned</small><strong id='bot-scanned-count' class='mono'>—</strong></div>"
+        "<div><small>ORB Hits</small><strong id='bot-hits-count' class='mono up'>—</strong></div>"
+        "<div><small>10K Replays</small><strong id='bot-replays-count' class='mono'>—</strong></div>"
+        "</div>"
+        "<div style='display:flex;gap:8px;flex-wrap:wrap;margin-top:8px'>"
+        "<button type='button' class='btn-primary' onclick='BhanuPro.rescanBot()'>↻ Re-Scan Live Cards</button>"
+        f"<a href='/timemachine?lang={lang}' class='btn-ghost'>🎲 Open Time Machine</a>"
+        "</div></div>"
+        "<div class='card'>"
+        "<div class='ml-h'><h3>🏆 AAJ KA BEST SETUP</h3><span class='sp'></span>"
+        "<span class='badge'>AUTO-SCANNED</span></div>"
+        "<div id='bot-best-setup-slot'><p class='loading'>Best setup load ho raha hai…</p></div>"
+        "<div id='bot-tm-prob-slot' style='margin-top:8px'></div>"
+        "</div></div>"
+        "<div class='card'><h3>Top Scanned Setups — Live ORB Hits</h3>"
+        "<div id='bot-top-setups-list'><p class='loading'>Top scanned setups load ho rahe hain…</p></div></div>"
+    )
+    return _page(
+        lang, "Bhanu Auto-Scan Bot", body,
+        scripts=_chart_js(),
+        live=True,
+        active="bot",
+    )
+
+
 def _tp123(direction: str, entry: float, stop: float) -> tuple[float, float, float]:
     """TP1 / TP2 / TP3 (1R / 2R / 3R) from an entry and a stop."""
     risk = abs(entry - stop)
@@ -1826,15 +1822,10 @@ def _tp123(direction: str, entry: float, stop: float) -> tuple[float, float, flo
 
 
 def _mc_for_symbol(symbol: str, direction: str) -> dict:
-    """Monte Carlo result for ``symbol``/``direction`` — but only when
-    the cached /timemachine replay is for exactly this setup. A replay
-    for another symbol says so plainly instead of being reused, and no
-    fresh 10,000-replay run is started from a page load."""
     try:
         data = _cached("timemachine", 600, timecheck_mod.collect_timemachine)
     except Exception as exc:  # noqa: BLE001
-        return {"available": False,
-                "reason": f"Time Machine unavailable — {exc}."}
+        return {"available": False, "reason": f"Time Machine unavailable — {exc}."}
     mc = (data or {}).get("monte_carlo", {})
     setup = (data or {}).get("setup") or {}
     if (mc.get("available") and setup.get("symbol") == symbol
@@ -1861,20 +1852,16 @@ def _entry_signal_for(
     trigger_time: str | None = None,
     yahoo_symbol: str | None = None,
 ) -> dict:
-    """Combined entry signal (ORB + levels + news + Time Machine +
-    volume) for one setup. News is cached 5 min, the Time Machine
-    result is shared with /timemachine (10 min), and the volume bars
-    are cached 60s — so the breakdown costs no extra slow fetch."""
     try:
         news_result = _cached(
             f"news:{symbol}", 300, lambda: news_mod.check_symbol(symbol))
-    except Exception:  # noqa: BLE001 - news failure never blocks the page
+    except Exception:  # noqa: BLE001
         news_result = {"unavailable": True}
     try:
         bars = _cached(
             f"signalbars:{yahoo_symbol}", 60,
             lambda: data_mod.fetch_intraday_bars(yahoo_symbol, interval="5m"))
-    except Exception:  # noqa: BLE001 - volume degrades to neutral
+    except Exception:  # noqa: BLE001
         bars = None
     volume_result = volume_mod.analyse_volume(
         symbol, bars=bars, trigger_time=trigger_time,
@@ -1889,8 +1876,6 @@ def _entry_signal_for(
 
 
 def _rr_bar_html(entry, stop, tp2) -> str:
-    """R:R bar for a trade panel: red risk segment vs green reward
-    segment (TP2 = 2R by construction), with SL / R:R / TP2 labels."""
     try:
         risk = abs(float(entry) - float(stop))
         reward = abs(float(tp2) - float(entry))
@@ -1910,9 +1895,6 @@ def _rr_bar_html(entry, stop, tp2) -> str:
 
 
 def _signal_breakdown_html(sig: dict) -> str:
-    """Signal breakdown as a trade panel (one entry, one exit): entry /
-    SL / TP1/TP2/TP3, R:R bar, and the five factor verdicts that built
-    it — news, Time Machine (10,000 replays) and volume included."""
     if not sig or sig.get("decision") == "NO SIGNAL":
         return (
             "<div class='tpanel'><div class='tt'><span>SIGNAL</span>"
@@ -1961,7 +1943,7 @@ def _signal_breakdown_html(sig: dict) -> str:
                 f"{_esc(st.get('news_checked_at', '—'))} · "
                 f"{st.get('symbols_scanned', 0)} symbols scanned</p>"
             )
-    except Exception:  # noqa: BLE001 - the breakdown never depends on the engine
+    except Exception:  # noqa: BLE001
         robot_line = ""
     return (
         f"<div class='tpanel'>"
@@ -1983,9 +1965,6 @@ def _signal_breakdown_html(sig: dict) -> str:
 
 
 def _orb_scan() -> dict:
-    """ORB scan result — live engine first (warmed every 2 min), then
-    a fresh watchlist file (<300s), then a cached scan. Shared by /orb
-    and /api/orbchart so both see the same hits."""
     warmed = poller_mod.get_orb()
     if warmed is not None:
         return warmed
@@ -1993,7 +1972,7 @@ def _orb_scan() -> dict:
     if watchlist.exists() and time.time() - watchlist.stat().st_mtime < 300:
         try:
             return json.loads(watchlist.read_text())
-        except Exception:  # noqa: BLE001 - fall through to a fresh scan
+        except Exception:  # noqa: BLE001
             pass
     if poller_mod.is_running():
         raise RuntimeError("ORB scan warming up")
@@ -2003,11 +1982,7 @@ def _orb_scan() -> dict:
 
 
 def orb_page(lang: str, query: dict | None = None) -> str:
-    """ORB scanner page — renders INSTANTLY. The scan table, candle
-    chart and signal breakdown all load lazily from /api/* after the
-    page (``bhanuOrbLoad``) — no Yahoo fetch ever blocks a page
-    render. Each section shows a "loading" state until its data
-    arrives; a failed fetch shows an honest message."""
+    """ORB scanner page with visible timeframe switcher (5m/15m/1h/D)."""
     t = lambda k: i18n_mod.t(k, lang)
     wanted = ((query or {}).get("symbol") or [""])[0].upper()
     sym_line = (
@@ -2018,7 +1993,7 @@ def orb_page(lang: str, query: dict | None = None) -> str:
     )
     body = (
         f"{sym_line}"
-        f"{_candle_chart_block('orb-chart', wanted)}"
+        f"{_candle_chart_block('orb-chart', wanted, tf_page='orb')}"
         f"<div id='orb-breakdown'><p class='loading'>Signal breakdown load ho raha hai…</p></div>"
         f"<div class='card' id='orb-table'><p class='loading'>ORB scan load ho raha hai…</p></div>"
     )
@@ -2032,8 +2007,6 @@ def orb_page(lang: str, query: dict | None = None) -> str:
 
 
 def _levels_table_html(result: dict, lang: str) -> str:
-    """Levels table card from a levels scan ``result`` (shared by
-    /api/levels)."""
     rows = result.get("levels", [])
     failed = result.get("failed", [])
 
@@ -2089,10 +2062,7 @@ def _levels_table_html(result: dict, lang: str) -> str:
         "previous-day high/low (PDH/PDL) and today's 09:15-09:30 opening range. "
         "ORB entry = first completed 5m bar closing outside the range; "
         "SL = range midpoint (1.5x ATR stop shown alongside); "
-        "TP1/TP2/TP3 = 1R/2R/3R; flat by "
-        "15:15 IST. A signal is stale once the price has moved on. "
-        "The NSE option chain is often blocked (HTTP 403) — no chain data is "
-        "faked here; see /chain.</p>"
+        "TP1/TP2/TP3 = 1R/2R/3R; flat by 15:15 IST.</p>"
     )
     return (
         f"<div class='card'>{switch_html}"
@@ -2111,11 +2081,7 @@ def _levels_table_html(result: dict, lang: str) -> str:
 
 
 def levels_page(lang: str, query: dict | None = None) -> str:
-    """Levels page — renders INSTANTLY. The levels table, candle
-    chart and signal breakdown all load lazily from /api/* after the
-    page (``bhanuLevelsLoad``) — no Yahoo fetch ever blocks a page
-    render. Each section shows a "loading" state until its data
-    arrives; a failed fetch shows an honest message."""
+    """Levels page with visible timeframe switcher (5m/15m/1h/D)."""
     t = lambda k: i18n_mod.t(k, lang)
     wanted = ((query or {}).get("symbol") or ["NIFTY"])[0].upper()
     sym_line = (
@@ -2124,7 +2090,7 @@ def levels_page(lang: str, query: dict | None = None) -> str:
     )
     body = (
         f"{sym_line}"
-        f"{_candle_chart_block('levels-chart', wanted)}"
+        f"{_candle_chart_block('levels-chart', wanted, tf_page='levels')}"
         f"<div id='levels-breakdown'><p class='loading'>Signal breakdown load ho raha hai…</p></div>"
         f"<div class='card' id='levels-table'><p class='loading'>Levels load ho raha hai…</p></div>"
     )
@@ -2138,14 +2104,6 @@ def levels_page(lang: str, query: dict | None = None) -> str:
 
 
 def _stock_setup_html(sig: dict | None, row: dict | None, stats: dict | None) -> str:
-    """Right-side SETUP card for the /stock detail page (SETUP READY
-    card, our own data): trigger, entry/SL/TP1/TP2/TP3,
-    risk in ₹ (stocks) or points (indices) and %, R:R, the
-    combined-signal summary, and the symbol's real ORB backtest
-    stats. No signal -> WATCHING with the pending trigger (buy above
-    the ORB high / sell below the low on a 5m close) and nearest
-    support/resistance."""
-
     def _f(value) -> str:
         return f"{value:,.2f}" if value is not None else "—"
 
@@ -2218,11 +2176,7 @@ def _stock_setup_html(sig: dict | None, row: dict | None, stats: dict | None) ->
 
 
 def stock_page(lang: str, query: dict | None = None) -> str:
-    """Per-stock detail page — renders INSTANTLY. Header, setup card,
-    summary and chart all load lazily from /api/stock
-    (``bhanuStockLoad``). Timeframe buttons switch the chart
-    interval; overlay pills toggle the chart overlays (an unavailable
-    overlay's pill is disabled)."""
+    """Per-stock detail page — all 8 overlay pills + 1m/5m/15m/1H/D switcher."""
     symbol = ((query or {}).get("symbol") or ["NIFTY"])[0].upper()
     symbol = "".join(c for c in symbol if c.isalnum() or c in ".^") or "NIFTY"
     tf_buttons = "".join(
@@ -2263,16 +2217,11 @@ def stock_page(lang: str, query: dict | None = None) -> str:
         head_extra=_chart_lib_tag(),
         scripts=_chart_js() + f"<script>bhanuStockLoad('{symbol}','5m');</script>",
         live=True,
-        active="",
+        active="stock",
     )
 
 
 def _api_stock(query: dict) -> dict:
-    """Full /stock detail payload: header, setup card, chart, summary.
-
-    Cached 120 s per symbol+interval. Every number is real (Yahoo/NSE
-    free data) or the section says "unavailable" — nothing invented.
-    """
     symbol_q = (query.get("symbol") or ["NIFTY"])[0]
     interval = (query.get("interval") or ["5m"])[0]
     try:
@@ -2285,7 +2234,7 @@ def _api_stock(query: dict) -> dict:
             q = data_mod.fetch_quote(yahoo_symbol)
             price, prev_close, change_pct = (
                 q.get("price"), q.get("prev_close"), q.get("change_pct"))
-        except Exception:  # noqa: BLE001 - price just unavailable
+        except Exception:  # noqa: BLE001
             price = prev_close = change_pct = None
         flow = poller_mod.get_flow()
         if flow is None and not poller_mod.is_running():
@@ -2311,7 +2260,7 @@ def _api_stock(query: dict) -> dict:
                     resistance=row.get("nearest_resistance"),
                     yahoo_symbol=yahoo_symbol,
                 )
-            except Exception:  # noqa: BLE001 - setup card degrades to WATCHING
+            except Exception:  # noqa: BLE001
                 sig = None
         try:
             hist = stock_mod.orb_history(yahoo_symbol)
@@ -2386,21 +2335,16 @@ def _api_stock(query: dict) -> dict:
 
 
 def sectors_page(lang: str) -> str:
-    t = lambda k: i18n_mod.t(k, lang)
     body = (
         "<div class='card'><h3>Sector Map — bubble chart</h3>"
         "<p class='muted'>Each bubble is a sector: green = up today, red = down, "
         "size = today's traded value (close × volume). Position: x = sector vs "
-        "NIFTY (right = beating NIFTY), y = sector % change. The map loads "
-        "after the page (it fetches all 39 symbols) — if it fails, it says so.</p>"
+        "NIFTY (right = beating NIFTY), y = sector % change.</p>"
         "<div id='sector-map'></div><div id='sector-map-list'></div></div>"
         "<div class='card'><h3>How it is built</h3>"
         "<p class='muted'>Sectors are the NSE's usual groupings of the 36 stocks "
         "in our universe; each sector's % change is the equal-weighted mean of "
-        "its members' intraday % change from the open. Market caps are not in "
-        "our data, so bubble size uses today's traded value instead — a real "
-        "weight, labelled as such. A sector whose members all failed to "
-        "fetch is listed as failed, never shown as flat.</p></div>"
+        "its members' intraday % change from the open.</p></div>"
     )
     return _page(
         lang, "Sectors", body,
@@ -2411,18 +2355,12 @@ def sectors_page(lang: str) -> str:
 
 
 def skills_page(lang: str) -> str:
-    """Skills page — renders INSTANTLY. The live skill statuses
-    (which take ~12 s cold, they fetch live data) load lazily from
-    /api/skills after the page, like every other slow section."""
     t = lambda k: i18n_mod.t(k, lang)
     note = (
         "<p class='muted'>All 11 DayTrader skills, in one place. "
-        "trader-budget was folded into the sizing calculator (budget is an "
-        "input, not a skill of its own — Bhanu's call) and trader-pelosi was "
-        "skipped on purpose (US Congress disclosures only, no Indian "
-        "equivalent). A skill whose live data cannot be fetched says so "
-        "plainly — nothing is faked. The Monte Carlo summary is a small "
-        "replay (200 runs); the full 10,000-run check is on the CLI.</p>"
+        "trader-budget was folded into the sizing calculator and trader-pelosi "
+        "was skipped on purpose. A skill whose live data cannot be fetched says so "
+        "plainly — nothing is faked.</p>"
     )
     body = (
         f"<div class='card'><div id='skills-table'>"
@@ -2435,8 +2373,6 @@ def skills_page(lang: str) -> str:
 
 
 def _api_skills() -> dict:
-    """Live skill statuses (cached 120 s) — the slow part of /skills,
-    served lazily so the page itself opens instantly."""
     try:
         rows = _cached("skills", 120, lambda: skills_mod.collect_skill_status(live=True))
     except Exception as exc:  # noqa: BLE001
@@ -2458,14 +2394,10 @@ def _api_skills() -> dict:
 
 
 def _timemachine_body(data: dict) -> str:
-    """Full Time Machine body HTML from a ``collect_timemachine``
-    result — setup, Monte Carlo, trade check, backtest. Shared by
-    /api/timemachine (lazy page load)."""
     def _fmt(value) -> str:
         return f"{value:,.2f}" if value is not None else "—"
 
     setup = data.get("setup")
-    setup_html = ""
     if setup:
         setup_html = (
             f"<div class='card'><h3>Today's best ORB setup</h3>"
@@ -2560,9 +2492,7 @@ def _timemachine_body(data: dict) -> str:
             f"<div class='table-wrap'><table><tr><th>Direction</th><th>Fires</th><th>Target wins</th>"
             f"<th>Stop losses</th><th>Neither</th><th>Avg R</th></tr>{bt_rows}</table></div>"
             f"<p class='muted'>History replay on real bars (range-midpoint stop, "
-            f"2R target, flat 15:15; no fees/slippage). Small sample, and the "
-            f"period was a strong uptrend — do not read this as a general edge. "
-            f"No accuracy percentage is claimed.</p></div>"
+            f"2R target, flat 15:15; no fees/slippage).</p></div>"
         )
     else:
         bt_html = (
@@ -2574,15 +2504,10 @@ def _timemachine_body(data: dict) -> str:
 
 
 def _tm_check_symbols() -> list[str]:
-    """Universe order for the Time Machine form dropdown: indices
-    first, then the F&O stocks alphabetically."""
     return list(data_mod.INDICES) + sorted(data_mod.STOCKS)
 
 
 def _tm_check_result_html(result: dict) -> str:
-    """Result card for a user's own Time Machine check (the form's
-    answer) — Monte Carlo outcome + trade check, same bands and
-    wording as the auto setup's card."""
     def _fmt(value) -> str:
         return f"{value:,.2f}" if value is not None else "—"
 
@@ -2598,9 +2523,7 @@ def _tm_check_result_html(result: dict) -> str:
         return head + f"<p>Monte Carlo unavailable — {_esc(mc.get('reason', 'no data'))}</p></div>"
     hist_html = ""
     if mc.get("histogram"):
-        hist_html = (
-            f"<div id='tm-check-hist'>{_mc_histogram_svg(mc['histogram'])}</div>"
-        )
+        hist_html = f"<div id='tm-check-hist'>{_mc_histogram_svg(mc['histogram'])}</div>"
     body = (
         hist_html
         + f"<p>Monte Carlo — {mc['n']:,} replays, apne trade ke levels par.</p>"
@@ -2632,10 +2555,6 @@ def _tm_check_result_html(result: dict) -> str:
 
 
 def timemachine_page(lang: str) -> str:
-    """Time Machine page — renders INSTANTLY; the setup / Monte Carlo
-    / trade check / backtest body loads lazily from /api/timemachine
-    (the 10,000-replay run is slow on a cold cache). The user's own
-    trade-check form sits above the lazy body."""
     t = lambda k: i18n_mod.t(k, lang)
     options = "".join(
         f"<option value='{_esc(sym)}'{' selected' if sym == 'NIFTY' else ''}>{_esc(sym)}</option>"
@@ -2708,7 +2627,7 @@ document.getElementById('history-form').addEventListener('submit',async function
 
 
 def chain_page(lang: str, query: dict) -> str:
-    """Render only the latest background snapshot, including its last failure."""
+    """Option Chain with CALL/PUT display, Greeks/IV, and Theta Radar."""
     symbol = (query.get("symbol") or ["NIFTY"])[0].upper()
     if symbol not in ("NIFTY", "BANKNIFTY"):
         symbol = "NIFTY"
@@ -2755,6 +2674,12 @@ def chain_page(lang: str, query: dict) -> str:
         f"<div><small>{label}</small><strong>{fmt(value, spec)}</strong></div>"
         for label, value, spec in metrics
     ) + "</div>"
+    body += (
+        f"<div class='theta-banner'><b>⚠️ Option Buyer's Trap &amp; Theta Radar ({symbol} · {_esc(expiry)}):</b> "
+        "Door ke OTM strikes mein theta decay tez hota hai — ATM/ITM strikes aur clear ORB/VWAP breakout par hi "
+        "<span class='opt-call'>CALL</span> / <span class='opt-put'>PUT</span> lein.</div>"
+    )
+
     strikes = selected["strikes"]
     atm = selected["atm_strike"]
     middle = next((i for i, row in enumerate(strikes) if row["strike"] == atm), 0)
@@ -2834,6 +2759,9 @@ def sizing_page(lang: str, query: dict) -> str:
 
 
 def paper_page(lang: str) -> str:
+    """Paper Trading page: Risk Guardian + Interactive Place Order Desk
+    (BUY CALL / BUY PUT / SELL, live 2s MTM, 1-tap Square Off) + Pre-Trade
+    Checklist + Auto Trade Journal + Server-side Paper Ledger."""
     t = lambda k: i18n_mod.t(k, lang)
     try:
         positions = paper_mod.list_positions()
@@ -2855,9 +2783,6 @@ def paper_page(lang: str) -> str:
         f"<td>{_esc(tr.get('realised_pnl', ''))}</td><td>{_esc(tr.get('reason', ''))}</td></tr>"
         for tr in trades[-20:]
     )
-    # Exit check — fresh news against an open position (cached 5 min
-    # per symbol). A severe headline says EXIT NOW, a mild one says
-    # EXIT EARLY; no news against the position says HOLD.
     exit_rows = ""
     for p in positions:
         try:
@@ -2867,7 +2792,7 @@ def paper_page(lang: str) -> str:
                 news_result = _cached(
                     f"news:{p['symbol']}", 300,
                     lambda s=p["symbol"]: news_mod.check_symbol(s))
-        except Exception:  # noqa: BLE001 - news failure never blocks the page
+        except Exception:  # noqa: BLE001
             news_result = {"unavailable": True}
         try:
             check = signal_mod.exit_signal(
@@ -2880,7 +2805,7 @@ def paper_page(lang: str) -> str:
                 f"<td><b>{_esc(check['action'])}</b></td>"
                 f"<td>{_esc(check['reason'])}</td></tr>"
             )
-        except Exception as exc:  # noqa: BLE001 - a failed check never blocks the page
+        except Exception as exc:  # noqa: BLE001
             exit_rows += (
                 f"<tr><td>{_esc(p.get('id', ''))}</td>"
                 f"<td>{_esc(p.get('symbol', ''))}</td>"
@@ -2888,6 +2813,56 @@ def paper_page(lang: str) -> str:
                 f"<td><b>HOLD</b></td>"
                 f"<td>Exit check unavailable — {_esc(exc)}</td></tr>"
             )
+
+    pro_desk_html = (
+        "<div class='kill-banner' id='pro-kill-banner'>"
+        "<div><b>🚨 KILL-SWITCH ACTIVE:</b> Aaj ka daily loss limit hit ho gaya — revenge trade mat karo.</div>"
+        "<button type='button' class='btn-ghost' onclick='BhanuPro.toggleKillSwitch(false)'>Unlock</button></div>"
+        "<div class='pro-grid-2'>"
+        "<div class='card'><div class='ml-h'><h3>💼 Paper Desk — Place Order</h3><span class='sp'></span>"
+        "<span class='pill'>Live 2s MTM</span></div>"
+        "<div class='metrics' style='margin:6px 0 10px'>"
+        "<div><small>Live MTM</small><strong id='pro-paper-mtm' class='mono'>₹0.00</strong></div>"
+        "<div><small>Realised (Desk)</small><strong id='pro-paper-realized' class='mono'>₹0.00</strong></div>"
+        "<div><small>Open Desk</small><strong id='pro-paper-open-count' class='mono'>0</strong></div></div>"
+        "<div class='pro-form-grid'>"
+        "<div class='pro-field'><label>Symbol</label><input id='pro-paper-symbol' value='NIFTY' placeholder='NIFTY / RELIANCE'></div>"
+        "<div class='pro-field'><label>Qty</label><input id='pro-paper-qty' type='number' value='50' min='1'></div>"
+        "<div class='pro-field'><label>Entry ₹ (blank = live)</label><input id='pro-paper-price' type='number' step='0.05' placeholder='Auto live quote'></div>"
+        "<div class='pro-field'><label>Stop Loss ₹</label><input id='pro-paper-sl' type='number' step='0.05' placeholder='Optional SL'></div>"
+        "</div>"
+        "<div class='chk-box'>"
+        "<div class='ml-h' style='margin-bottom:4px'><b style='font-size:11px'>✅ PRE-TRADE CHECKLIST</b><span class='sp'></span>"
+        "<span class='pill' id='pro-chk-badge'>2 / 4 READY</span></div>"
+        "<label class='chk-item'><input type='checkbox' class='pro-pre-chk' checked onchange='BhanuPro.updateChecklist()'> Smart Money / Sector same direction mein hai?</label>"
+        "<label class='chk-item'><input type='checkbox' class='pro-pre-chk' checked onchange='BhanuPro.updateChecklist()'> R:R kam se kam 1:2 hai?</label>"
+        "<label class='chk-item'><input type='checkbox' class='pro-pre-chk' onchange='BhanuPro.updateChecklist()'> Stop Loss fixed hai?</label>"
+        "<label class='chk-item'><input type='checkbox' class='pro-pre-chk' onchange='BhanuPro.updateChecklist()'> 15:15 flat rule yaad hai?</label>"
+        "</div>"
+        "<div class='order-btns'>"
+        "<button type='button' class='btn-buy-call' id='btn-buy-call' onclick=\"BhanuPro.placePaperOrder('BUY CALL')\">BUY CALL</button>"
+        "<button type='button' class='btn-buy-put' id='btn-buy-put' onclick=\"BhanuPro.placePaperOrder('BUY PUT')\">BUY PUT</button>"
+        "<button type='button' class='btn-sell' id='btn-sell' onclick=\"BhanuPro.placePaperOrder('SELL')\">SELL</button>"
+        "</div>"
+        "<div id='pro-paper-positions' style='margin-top:10px'></div></div>"
+        "<div class='card'><div class='ml-h'><h3>🛡️ Risk Guardian &amp; Kill-Switch</h3><span class='sp'></span>"
+        "<button type='button' class='btn-ghost' onclick='BhanuPro.toggleKillSwitch()'>Toggle Kill-Switch</button></div>"
+        "<div class='pro-form-grid'>"
+        "<div class='pro-field'><label>Capital ₹</label><input id='rg-capital' type='number' value='100000' step='10000' oninput='BhanuPro.calcRiskGuardian()'></div>"
+        "<div class='pro-field'><label>Risk / Trade %</label><input id='rg-risk-pct' type='number' value='1.0' step='0.25' oninput='BhanuPro.calcRiskGuardian()'></div>"
+        "<div class='pro-field'><label>Entry ₹</label><input id='rg-entry' type='number' value='25800' step='0.5' oninput='BhanuPro.calcRiskGuardian()'></div>"
+        "<div class='pro-field'><label>Stop Loss ₹</label><input id='rg-sl' type='number' value='25750' step='0.5' oninput='BhanuPro.calcRiskGuardian()'></div>"
+        "</div>"
+        "<div class='metrics'>"
+        "<div><small>Exact Qty</small><strong id='rg-qty-out' class='up mono'>20 units</strong></div>"
+        "<div><small>Max Risk</small><strong id='rg-risk-out' class='down mono'>₹1,000</strong></div>"
+        "<div><small>Est. Charges</small><strong id='rg-charges-out' class='mono'>₹133</strong></div></div>"
+        "<div style='margin-top:12px'><h3>📓 Auto Trade Journal</h3>"
+        "<p class='muted' id='pro-journal-insight'>Square-off kiye gaye trades yahan auto-log hote hain.</p>"
+        "<div id='pro-journal-list'></div></div>"
+        "</div></div>"
+    )
+
     exit_html = (
         "<h3>Exit check — fresh news on open positions</h3>"
         "<div class='table-wrap'><table><tr><th>ID</th><th>Symbol</th><th>Dir</th>"
@@ -2895,21 +2870,20 @@ def paper_page(lang: str) -> str:
         f"{exit_rows or '<tr><td colspan=5>no open positions</td></tr>'}</table></div>"
     )
     body = (
-        f"<p>Today: {summary.get('trades', 0)} trade(s), realised "
+        pro_desk_html
+        + f"<div class='card'><p>Today: {summary.get('trades', 0)} trade(s), realised "
         f"₹{summary.get('realised_pnl', 0):,.2f}, risk taken "
         f"₹{summary.get('risk_taken', 0):,.2f}, flat: {summary.get('flat')}</p>"
         f"<h3>Open positions</h3><div class='table-wrap'><table><tr><th>ID</th><th>Symbol</th><th>Dir</th>"
         f"<th>Qty</th><th>Entry</th><th>Stop</th><th>Target</th></tr>{pos_rows or '<tr><td colspan=7>none</td></tr>'}</table></div>"
         f"{exit_html}"
         f"<h3>Closed trades</h3><div class='table-wrap'><table><tr><th>ID</th><th>Symbol</th><th>Dir</th>"
-        f"<th>Exit</th><th>P&amp;L</th><th>Reason</th></tr>{tr_rows or '<tr><td colspan=6>none</td></tr>'}</table></div>"
+        f"<th>Exit</th><th>P&amp;L</th><th>Reason</th></tr>{tr_rows or '<tr><td colspan=6>none</td></tr>'}</table></div></div>"
     )
     return _page(lang, t("paper_trading"), body, active="paper")
 
 
 def _api_flow() -> dict:
-    """Smart Money Flow JSON — live engine first (warmed every 5 min),
-    on-demand fetch (cached 5 min) only when the engine has nothing."""
     warmed = poller_mod.get_flow()
     if warmed is not None:
         return warmed
@@ -2922,8 +2896,6 @@ def _api_flow() -> dict:
 
 
 def _api_sectors() -> dict:
-    """Sector map JSON — live engine first, same flow data, so no
-    second round of fetches."""
     warmed = poller_mod.get_sectors()
     if warmed is not None:
         return warmed
@@ -2936,7 +2908,6 @@ def _api_sectors() -> dict:
         return {"sectors": [], "failed": [], "error": str(exc)}
 
 
-#: Index symbols for the live quote refresh (home page).
 _QUOTE_SYMBOLS: tuple[tuple[str, str], ...] = (
     ("^NSEI", "NIFTY 50"),
     ("^NSEBANK", "BANK NIFTY"),
@@ -2945,11 +2916,6 @@ _QUOTE_SYMBOLS: tuple[tuple[str, str], ...] = (
 
 
 def _api_quotes() -> dict:
-    """Live index quotes for the home-page refresh.
-
-    The live engine's warmed quotes come first (NSE + fresh spark,
-    in-memory, instant); only when the engine has nothing yet does
-    this fall back to the on-demand fetch (cached 60s)."""
     warmed = poller_mod.get_quotes()
     if warmed is not None:
         return {"quotes": warmed,
@@ -2970,7 +2936,7 @@ def _api_quotes() -> dict:
                     "error": None,
                 }
             )
-        except Exception as exc:  # noqa: BLE001 - report per symbol, never fake
+        except Exception as exc:  # noqa: BLE001
             out.append(
                 {
                     "symbol": symbol,
@@ -2985,11 +2951,6 @@ def _api_quotes() -> dict:
 
 
 def _api_intraday(query: dict) -> dict:
-    """Intraday line/candle payload for one index.
-
-    The live engine's warmed 5m bars come first (in-memory, instant);
-    only when the engine has nothing yet does this fall back to the
-    on-demand fetch (cached 60s)."""
     symbol = (query.get("symbol") or ["^NSEI"])[0]
     if symbol not in ("^NSEI", "^NSEBANK", "^BSESN"):
         return {"symbol": symbol, "line": [], "candles": [], "error": f"unknown symbol {symbol}"}
@@ -2999,15 +2960,12 @@ def _api_intraday(query: dict) -> dict:
     if poller_mod.is_running():
         return {"symbol": symbol, "line": [], "candles": [], "error": "Intraday feed warming up"}
     try:
-        return _cached(
-            f"chart:{symbol}", 60, lambda: charts_mod.intraday_series(symbol)
-        )
+        return _cached(f"chart:{symbol}", 60, lambda: charts_mod.intraday_series(symbol))
     except Exception as exc:  # noqa: BLE001
         return {"symbol": symbol, "line": [], "candles": [], "error": str(exc)}
 
 
 def _api_orbchart(query: dict) -> dict:
-    """Candlestick + overlays for the ORB hit of ``?symbol=`` (cached 60s)."""
     symbol = (query.get("symbol") or [""])[0].upper()
     try:
         result = _orb_scan()
@@ -3029,7 +2987,6 @@ def _api_orbchart(query: dict) -> dict:
 
 
 def _api_levelschart(query: dict) -> dict:
-    """Candlestick + overlays for one index's levels (cached 60s)."""
     symbol = (query.get("symbol") or ["NIFTY"])[0].upper()
     yahoo_symbol = data_mod.INDICES.get(symbol)
     if yahoo_symbol is None:
@@ -3044,10 +3001,6 @@ def _api_levelschart(query: dict) -> dict:
 
 
 def _api_timemachine() -> dict:
-    """Monte Carlo + trade check + backtest — live engine first
-    (warmed every 10 min), on-demand run (cached 10 min) only when
-    the engine has nothing. Returns the data plus a pre-rendered HTML
-    body for the lazy page load."""
     data = poller_mod.get_timemachine()
     if data is None:
         if poller_mod.is_running():
@@ -3062,15 +3015,6 @@ def _api_timemachine() -> dict:
 
 
 def _api_timemachine_check(query: dict) -> dict:
-    """User's own trade through the Time Machine — the form's endpoint.
-
-    GET params: symbol, entry, stop, target, direction (CALL/PUT or
-    long/short). Read-only: reuses timecheck.check_trade, which replays
-    the symbol's own 5m bars and runs the same trade check — zero
-    effect on the robot, signals, scans or poller. The check is cached
-    5 minutes per exact input so a double submit does not re-run
-    10,000 replays. Always returns a 200 JSON with ok True/False —
-    never a 500 on bad input."""
     symbol = (query.get("symbol") or [""])[0]
     entry = (query.get("entry") or [""])[0]
     stop = (query.get("stop") or [""])[0]
@@ -3082,7 +3026,7 @@ def _api_timemachine_check(query: dict) -> dict:
         result = _cached(
             f"tmcheck:{symbol}:{entry}:{stop}:{target}:{direction}", 300,
             lambda: timecheck_mod.check_trade(symbol, entry, stop, target, direction))
-    except Exception as exc:  # noqa: BLE001 - bad input must not 500
+    except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
     if not result.get("ok"):
         return {"ok": False, "error": result.get("error", "check nahi ho paya")}
@@ -3092,9 +3036,6 @@ def _api_timemachine_check(query: dict) -> dict:
 
 
 def _api_orb(query: dict, lang: str) -> dict:
-    """ORB scan table HTML fragment (the scan is cached 2 min — it
-    fetches 39 symbols). ``?limit=`` caps the rows (home uses 10).
-    ``top_symbol`` is the first hit, for the lazy candle chart."""
     try:
         limit = int((query.get("limit") or ["50"])[0])
     except (TypeError, ValueError):
@@ -3111,7 +3052,6 @@ def _api_orb(query: dict, lang: str) -> dict:
 
 
 def _api_orbbreakdown(query: dict, lang: str) -> dict:
-    """Signal breakdown HTML fragment for one ORB hit."""
     symbol = (query.get("symbol") or [""])[0].upper()
     try:
         result = _orb_scan()
@@ -3137,9 +3077,6 @@ def _api_orbbreakdown(query: dict, lang: str) -> dict:
 
 
 def _api_levels(query: dict, lang: str) -> dict:
-    """Levels table HTML fragment — live engine first (warmed every
-    2 min), on-demand scan (cached 60s) only when the engine has
-    nothing. ``top_symbol`` is the first row, for the lazy candle chart."""
     warmed = poller_mod.get_levels()
     if warmed is not None:
         rows = warmed.get("levels", [])
@@ -3161,7 +3098,6 @@ def _api_levels(query: dict, lang: str) -> dict:
 
 
 def _api_levelsbreakdown(query: dict, lang: str) -> dict:
-    """Signal breakdown HTML fragment for one index's levels."""
     symbol = (query.get("symbol") or ["NIFTY"])[0].upper()
     try:
         result = poller_mod.get_levels()
@@ -3186,7 +3122,7 @@ def _api_levelsbreakdown(query: dict, lang: str) -> dict:
             lambda: data_mod.fetch_intraday_bars(yahoo_symbol, interval="5m"))
         hit = scanner_mod.orb_hit(bars) if bars is not None else None
         trigger_time = hit.get("bar_time") if hit else None
-    except Exception:  # noqa: BLE001 - volume degrades to neutral
+    except Exception:  # noqa: BLE001
         trigger_time = None
     return {
         "html": _breakdown_for(
@@ -3200,34 +3136,21 @@ def _api_levelsbreakdown(query: dict, lang: str) -> dict:
 
 
 def _api_news(query: dict, lang: str) -> dict:
-    """News feed HTML fragment — the live engine's warmed news check
-    first, so the home-page refresh never waits on a fresh fetch."""
     try:
-        return {"html": _news_feed_html(
-            lang, news=poller_mod.get_news("NIFTY"))}
+        return {"html": _news_feed_html(lang, news=poller_mod.get_news("NIFTY"))}
     except Exception as exc:  # noqa: BLE001
         return {"html": "", "error": str(exc)}
 
 
 def _robot_html() -> str:
-    """Robot status as a trade panel — the bot's own entry/exit (one
-    entry, one exit) from the fresh scans, plus what the live engine
-    is doing right now.
-
-    Every number comes from the engine's in-memory state (instant,
-    never a fetch): last scan times, symbols scanned, ORB hits, news
-    check time, Time Machine replays, and the best setup the fresh
-    scans found, with entry/SL/TP1/TP2/TP3. When the engine has not
-    scanned yet, the card says it is warming up — never a fake status.
-    """
+    """Robot status + AAJ KA BEST SETUP with real 10,000-replay probability box."""
     st = poller_mod.status()
     ticks = st.get("ticks", {})
 
     def _clock(stamp: str) -> str:
-        # "2026-11-26 14:30:00 IST" -> "14:30:00"
         return stamp[11:19] if len(stamp) >= 19 else (stamp or "—")
 
-    market = "OPEN" if st.get("market_open") else "closed (slow polls)"
+    market = "OPEN" if st.get("market_open") else "Market Closed (frozen)"
     live_badge = ("<span class='pill'>Background job updated</span>"
                   if st.get("fresh") else "<span>warming up…</span>")
     scans = (
@@ -3258,9 +3181,6 @@ def _robot_html() -> str:
             f"last good data kept.</p>"
         )
 
-    # Best setup from the fresh scans: a levels signal first, else
-    # the first ORB hit. Entry/SL/TPs are the robot's own numbers.
-    best = ""
     levels = poller_mod.get_levels()
     picked = None
     if levels:
@@ -3281,6 +3201,20 @@ def _robot_html() -> str:
                     break
                 except (KeyError, TypeError, ValueError):
                     continue
+
+    # Real 10,000-replay probabilities ("itne % ye hoga") from poller when available
+    prob_html = ""
+    tm_data = poller_mod.get_timemachine() or {}
+    mc = tm_data.get("monte_carlo") or {}
+    if mc.get("available"):
+        prob_html = (
+            "<div class='prob-grid mono'>"
+            f"<div class='prob-cell'><small>TARGET PEHLE</small><strong class='up'>{mc.get('target_first_pct', 0):.1f}%</strong></div>"
+            f"<div class='prob-cell'><small>STOP PEHLE</small><strong class='down'>{mc.get('stop_first_pct', 0):.1f}%</strong></div>"
+            f"<div class='prob-cell'><small>AVG OUTCOME</small><strong>{mc.get('avg_r', 0):+.2f}R</strong></div>"
+            "</div>"
+        )
+
     if picked:
         symbol, direction, entry, stop = picked
         tp1, tp2, tp3 = _tp123(str(direction), float(entry), float(stop))
@@ -3303,6 +3237,7 @@ def _robot_html() -> str:
             f"<div class='tr'><span>TP2 — 2R</span><b>{tp2:,.2f}</b></div>"
             f"<div class='tr'><span>TP3 — 3R</span><b>{tp3:,.2f}</b></div>"
             f"{_rr_bar_html(entry, stop, tp2)}"
+            f"{prob_html}"
             f"<div class='st sig'><b>SIGNAL</b> — entry {float(entry):,.2f}, "
             f"exit at SL {float(stop):,.2f} or TP1/TP2/TP3. One entry, one exit.</div>"
             f"</div>"
@@ -3312,6 +3247,7 @@ def _robot_html() -> str:
             f"<div class='tpanel'>"
             f"<div class='tt'><span>AAJ KA BEST SETUP</span>"
             f"<span>{live_badge}</span></div>"
+            f"{prob_html}"
             f"<div class='st none'><b>WATCHING</b> — no ORB signal right now, "
             f"robot is watching.</div></div>"
         )
@@ -3319,14 +3255,13 @@ def _robot_html() -> str:
         f"<div class='card'><div class='ml-h'><h3>BOT</h3>"
         f"<span class='sub'>news check + 10,000 replays + volume — "
         f"entry/exit isse banta hai</span><span class='sp'></span>"
-        f"{live_badge}</div>"
+        f"<a href='/bot'>Full Bot Page →</a>{live_badge}</div>"
         f"<p class='muted'>Market {market} · {counts}</p>"
         f"{panel}<p class='muted'>{scans}</p>{backoff}</div>"
     )
 
 
 def _api_robot() -> dict:
-    """Robot card HTML fragment for the home-page refresh."""
     try:
         return {"html": _robot_html()}
     except Exception as exc:  # noqa: BLE001
@@ -3334,14 +3269,6 @@ def _api_robot() -> dict:
 
 
 def _api_live(query: dict) -> dict:
-    """Live tick for one index: latest price + 1-minute closes.
-
-    Served from the live engine's spark state (in-memory, instant —
-    the indices spark every 2 s). The browser's line charts call this
-    every 2 s and update the last point in place, so the line moves
-    while you watch — no page reload, no 60 s wait. When the engine
-    has not had a spark tick yet, this says so honestly instead of
-    faking a price."""
     symbol = (query.get("symbol") or ["^NSEI"])[0]
     if symbol not in ("^NSEI", "^NSEBANK", "^BSESN"):
         return {"symbol": symbol, "ltp": None, "line": [],
@@ -3354,9 +3281,6 @@ def _api_live(query: dict) -> dict:
     line = [{"time": int(c["t"]), "value": float(c["c"])}
             for c in closes[-400:]]
     ltp = entry.get("ltp")
-    # Same pinned previous close as /api/quotes — never Yahoo's own
-    # chartPreviousClose on its own (it disagreed with NSE on 26 Nov
-    # 2026: 25,349.70 vs 25,819.25 for NIFTY).
     prev = poller_mod.get_prev_close(symbol)
     if prev is None:
         prev = entry.get("prev")
@@ -3366,13 +3290,10 @@ def _api_live(query: dict) -> dict:
 
 
 def _api_poller() -> dict:
-    """Live-engine status (in-memory, instant — never fetches)."""
     return poller_mod.status()
 
 
 def _levels_mini_html(result: dict) -> str:
-    """Compact levels summary for home: symbol / price / support /
-    resistance / signal (5 columns, wrapped like every table)."""
     rows = result.get("levels", [])[:3]
 
     def _fmt(value) -> str:
@@ -3401,7 +3322,6 @@ def _levels_mini_html(result: dict) -> str:
 
 
 def _api_levelsmini() -> dict:
-    """Levels mini-summary HTML fragment for home."""
     result = poller_mod.get_levels()
     if result is None:
         if poller_mod.is_running():
@@ -3414,8 +3334,6 @@ def _api_levelsmini() -> dict:
 
 
 def _tm_mini_html(data: dict) -> str:
-    """Compact Time Machine summary for home: today's best setup +
-    Monte Carlo target-first % (10,000 replays)."""
     setup = data.get("setup")
     mc = data.get("monte_carlo", {}) or {}
     if not setup and not mc.get("available"):
@@ -3448,7 +3366,6 @@ def _tm_mini_html(data: dict) -> str:
 
 
 def _api_tmmini() -> dict:
-    """Time Machine mini-summary HTML fragment for home."""
     data = poller_mod.get_timemachine()
     if data is None:
         if poller_mod.is_running():
@@ -3461,7 +3378,7 @@ def _api_tmmini() -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *args):  # keep the console quiet
+    def log_message(self, *args):
         pass
 
     def do_POST(self):
@@ -3475,7 +3392,11 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("CSV must be between 1 byte and 8 MiB.")
             q = parse_qs(url.query)
             args = [q.get(k, [""])[0] for k in ("start", "end", "fee", "slip", "qty")]
-            result = range_replay.replay(self.rfile.read(length).decode("utf-8"), *args, strategy=q.get("strategy", ["orb15"])[0])
+            result = range_replay.replay(
+                self.rfile.read(length).decode("utf-8"),
+                *args,
+                strategy=q.get("strategy", ["orb15"])[0],
+            )
         except (ValueError, UnicodeError) as exc:
             result = {"error": str(exc)}
         self._send_json(result)
@@ -3497,7 +3418,7 @@ class Handler(BaseHTTPRequestHandler):
             build = details.get(parsed.path)
             if build:
                 if self.headers.get("Prefer") == "respond-async":
-                    key = (parsed.path, tuple(sorted((k,v[0]) for k,v in query.items())))
+                    key = (parsed.path, tuple(sorted((k, v[0]) for k, v in query.items())))
                     status, result = _detail_jobs.read(key, build)
                     self._send_json(result, status)
                 else:
@@ -3560,6 +3481,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path in ("/", ""):
                 body = home(lang)
+            elif parsed.path == "/bot":
+                body = bot_page(lang)
             elif parsed.path == "/orb":
                 body = orb_page(lang, query)
             elif parsed.path == "/levels":
@@ -3584,8 +3507,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(body, 200)
         except (BrokenPipeError, ConnectionResetError):
-            return  # The browser navigated away while a section was loading.
-        except Exception as exc:  # noqa: BLE001 - never crash the server on a page
+            return
+        except Exception as exc:  # noqa: BLE001
             self._send(_page(lang, "Error", f"<p>Something went wrong: {_esc(exc)}</p>"), 500)
 
     def _send_json(self, payload: dict, status: int = 200):
@@ -3612,7 +3535,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     try:
         poller_mod.start()
-    except Exception:  # noqa: BLE001 - the server must start even if the engine cannot
+    except Exception:  # noqa: BLE001
         pass
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Bhanu Indian Day Trader running at http://localhost:{PORT} (paper trading only)")
