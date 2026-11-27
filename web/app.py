@@ -549,7 +549,7 @@ function bhanuAnimLast(id, symbol, fromVal, toVal, time){
   function frame(ts){
     if(st.animToken!==token){return;}
     if(start===null){start=ts;}
-    var k=Math.min(1,(ts-start)/900);
+    var k=Math.min(1,(ts-start)/1900);
     var v=fromVal+(toVal-fromVal)*bhanuEase(k);
     if(st.series){try{st.series.update({time:time,value:v});}catch(e){}}
     else if(st.el){
