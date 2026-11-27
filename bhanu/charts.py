@@ -138,6 +138,92 @@ def bars_to_pct_line(bars: pd.DataFrame) -> list[dict[str, Any]]:
     ]
 
 
+def _ema(values: list[float], period: int) -> list[float | None]:
+    """EMA aligned with ``values`` (``None`` until seeded).
+
+    Seeded with the simple average of the first ``period`` values
+    (or all values when fewer are available — the standard seeding,
+    so a short session still yields a line instead of nothing).
+    """
+    n = len(values)
+    if n == 0:
+        return []
+    seed_n = min(period, n)
+    out: list[float | None] = [None] * n
+    ema = sum(values[:seed_n]) / seed_n
+    out[seed_n - 1] = ema
+    k = 2.0 / (period + 1)
+    for i in range(seed_n, n):
+        ema = values[i] * k + ema * (1 - k)
+        out[i] = ema
+    return out
+
+
+def rsi_series(times: list[int], closes: list[float],
+               period: int = 14) -> list[dict[str, Any]]:
+    """Wilder's RSI (default 14) as ``[{time, value}]``.
+
+    The first value appears after ``period`` closes; with fewer
+    closes the series is empty — no RSI is invented from thin data.
+    """
+    n = len(closes)
+    if n <= period:
+        return []
+    gains = [max(0.0, closes[i] - closes[i - 1]) for i in range(1, n)]
+    losses = [max(0.0, closes[i - 1] - closes[i]) for i in range(1, n)]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    def _rsi(g: float, l: float) -> float:
+        if l == 0:
+            return 100.0 if g > 0 else 50.0
+        return 100.0 - 100.0 / (1.0 + g / l)
+
+    out = [{"time": times[period], "value": round(_rsi(avg_gain, avg_loss), 2)}]
+    for i in range(period + 1, n):
+        avg_gain = (avg_gain * (period - 1) + gains[i - 1]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i - 1]) / period
+        out.append({"time": times[i], "value": round(_rsi(avg_gain, avg_loss), 2)})
+    return out
+
+
+def macd_series(times: list[int],
+                closes: list[float]) -> dict[str, list[dict[str, Any]]]:
+    """MACD (12, 26, 9) as ``{line, signal, hist}`` point lists.
+
+    EMAs are seeded with the SMA of their first ``period`` closes
+    (or all closes when the session is shorter), so the MACD line
+    appears as soon as both EMAs exist; the signal line needs 9
+    MACD values before it appears. Empty lists when there is not
+    enough data — never fabricated.
+    """
+    ema_fast = _ema(closes, 12)
+    ema_slow = _ema(closes, 26)
+    macd_vals: list[float | None] = [
+        (f - s) if (f is not None and s is not None) else None
+        for f, s in zip(ema_fast, ema_slow)
+    ]
+    line = [
+        {"time": t, "value": round(v, 2)}
+        for t, v in zip(times, macd_vals) if v is not None
+    ]
+    # Signal = EMA-9 of the MACD line, seeded with the SMA of its
+    # first 9 values.
+    sig_vals = _ema([p["value"] for p in line], 9)
+    signal = [
+        {"time": p["time"], "value": round(v, 2)}
+        for p, v in zip(line, sig_vals) if v is not None
+    ]
+    sig_by_time = {p["time"]: p["value"] for p in signal}
+    hist = [
+        {"time": p["time"],
+         "value": round(p["value"] - sig_by_time[p["time"]], 2),
+         "color": COLOR_UP if p["value"] >= sig_by_time[p["time"]] else COLOR_DOWN}
+        for p in line if p["time"] in sig_by_time
+    ]
+    return {"line": line, "signal": signal, "hist": hist}
+
+
 def intraday_series(yahoo_symbol: str, days: int = 1) -> dict[str, Any]:
     """Candles + close line for ``yahoo_symbol`` (today by default).
 
@@ -419,6 +505,22 @@ def _overlay_payload(
                     trigger_time = _unix(ts)
                     break
         box_from = trigger_time or candles[0]["time"]
+        # BUY / SELL marker on the trigger bar (CALL green / PUT red
+        # convention: long = BUY, short = SELL). Only when a trigger
+        # bar was actually found — never placed on a guessed bar.
+        if trigger_time is not None:
+            is_long = signal == "long"
+            markers.append(
+                {
+                    "time": trigger_time,
+                    "position": "belowBar" if is_long else "aboveBar",
+                    "color": COLOR_UP if is_long else COLOR_DOWN,
+                    "shape": "arrowUp" if is_long else "arrowDown",
+                    "text": "BUY" if is_long else "SELL",
+                    "group": "trades",
+                }
+            )
+            markers.sort(key=lambda m: m["time"])
         boxes.append(
             {
                 "top": max(entry, target),
@@ -460,6 +562,15 @@ def _overlay_payload(
     if price_range and price_range > 0:
         lines = _dedupe_line_labels(lines, price_range)
 
+    # RSI (14) + MACD (12, 26, 9) from the drawn bars' closes — the
+    # indicators the Levels / stock charts were missing. Empty when
+    # the session is too short; never fabricated.
+    _close_s = chart_bars["close"].dropna()
+    _times = [_unix(ts) for ts in _close_s.index]
+    _closes = [float(c) for c in _close_s]
+    rsi_line = rsi_series(_times, _closes)
+    macd = macd_series(_times, _closes)
+
     return {
         "symbol": symbol,
         "candles": candles,
@@ -474,6 +585,23 @@ def _overlay_payload(
         "boxes": boxes,
         "last_time": last_time,
         "error": None,
+        "rsi": rsi_line,
+        "macd": macd,
+        "rsi_last": rsi_line[-1]["value"] if rsi_line else None,
+        "macd_last": macd["line"][-1]["value"] if macd["line"] else None,
+        "macd_signal_last": macd["signal"][-1]["value"] if macd["signal"] else None,
+        # Overlay availability — a group with nothing to show reports
+        # False so the page pill says "unavailable" instead of faking it.
+        "overlays": {
+            "orderblock": any(b.get("kind") == "ob" for b in boxes),
+            "fvg": any(b.get("kind") == "fvg" for b in boxes),
+            "structure": any(m.get("group") == "structure" for m in markers),
+            "liquidity": False,
+            "vwap": bool(vwap_line),
+            "trades": any(m.get("group") == "trades" for m in markers),
+            "rsi": bool(rsi_line),
+            "macd": bool(macd["line"]),
+        },
     }
 
 
@@ -525,8 +653,26 @@ def orb_chart(yahoo_symbol: str, symbol_label: str | None = None) -> dict[str, A
     today = structure_mod.session_bars_today(bars)
     hit = scanner_mod.orb_hit(today)
     if hit is None:
-        payload = _overlay_payload(label, bars, [], None, None, None, None)
-        payload["error"] = "no ORB trigger yet today — range only"
+        # No breakout yet: still return the range-only chart (candles +
+        # ORB range / PDH / PDL lines) with a ``note`` — NOT an error —
+        # so the page renders the chart and keeps updating every 2 s
+        # instead of freezing on a retry loop. The note is shown in the
+        # chart legend; a breakout appears on the next refresh.
+        rng = scanner_mod.orb_range(today)
+        extra: list[dict[str, Any]] = []
+        if rng is not None:
+            extra.append({"price": rng[0], "label": "ORB HIGH", "color": COLOR_UP, "style": 2})
+            extra.append({"price": rng[1], "label": "ORB LOW", "color": COLOR_DOWN, "style": 2})
+        try:
+            daily = levels_mod.fetch_daily_bars(yahoo_symbol, days=30)
+            pdh_pdl = levels_mod.prev_day_high_low(daily)
+            if pdh_pdl is not None:
+                extra.append({"price": pdh_pdl[0], "label": "PDH", "color": COLOR_PDH, "style": 2})
+                extra.append({"price": pdh_pdl[1], "label": "PDL", "color": COLOR_PDL, "style": 2})
+        except Exception:  # noqa: BLE001 - PDH/PDL lines just omitted
+            pass
+        payload = _overlay_payload(label, bars, extra, None, None, None, None)
+        payload["note"] = "no ORB trigger yet today — range only, chart keeps updating"
         return payload
     plan = entry_mod.plan_orb_entry(today, direction=hit["direction"], symbol=label)
     entry = stop = target = None
@@ -701,14 +847,19 @@ def stock_chart(
     payload["levels"] = row
     boxes = payload.get("boxes", [])
     markers = payload.get("markers", [])
-    payload["overlays"] = {
+    # Merge with the availability flags _overlay_payload already
+    # computed (rsi/macd/vwap/…); the trades/structure flags are
+    # re-derived here because past-trade markers were appended after.
+    ov = dict(payload.get("overlays", {}))
+    ov.update({
         "orderblock": any(b.get("kind") == "ob" for b in boxes),
         "fvg": any(b.get("kind") == "fvg" for b in boxes),
         "structure": any(m.get("group") == "structure" for m in markers),
         "liquidity": False,
         "vwap": bool(payload.get("vwap")),
         "trades": any(m.get("group") == "trades" for m in markers),
-    }
+    })
+    payload["overlays"] = ov
     return payload
 
 
