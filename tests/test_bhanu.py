@@ -425,6 +425,7 @@ class TestNews(unittest.TestCase):
                 patch.object(news_mod, "STATE_PATH", state_path),
                 patch.object(news_mod, "fetch_nse_announcements", return_value=(nse_items, "")),
                 patch.object(news_mod, "fetch_yahoo_headlines", return_value=(yahoo_items, "")),
+                patch.object(news_mod, "fetch_google_news", return_value=([], "")),
                 patch.object(news_mod, "fetch_bse_announcements", return_value=([], "bse note")),
                 patch.object(news_mod, "fetch_marketaux_news", return_value=([], "no key")),
                 patch("bhanu.data.fetch_quote", return_value={
@@ -682,6 +683,8 @@ class TestMarketaux(unittest.TestCase):
                              return_value=(mx_items, "")),
                 patch.object(news_mod, "fetch_yahoo_headlines",
                              return_value=(yahoo_items, "")),
+                patch.object(news_mod, "fetch_google_news",
+                             return_value=([], "")),
                 patch("bhanu.data.fetch_quote", return_value={
                     "price": 25900.0, "prev_close": 25800.0, "change_pct": 0.39}),
             ]
