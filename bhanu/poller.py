@@ -648,7 +648,7 @@ def _tick_alerts():
 
 _JOBS: tuple[tuple[str, float, float, object], ...] = (
     ("paper_alerts", 20, 20, _tick_alerts),
-    ("chains", 120, 900, _tick_chains),
+    ("chains", 30, 900, _tick_chains),
     ("indices", POLL_INDICES_FAST_S, POLL_INDICES_SLOW_S, _tick_indices),
     ("spark_fast", POLL_SPARK_FAST_S, POLL_SPARK_SLOW_S, _tick_spark_fast),
     ("spark_full", POLL_SPARK_FULL_FAST_S, POLL_SPARK_FULL_SLOW_S,
