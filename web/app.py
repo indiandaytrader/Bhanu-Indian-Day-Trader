@@ -830,6 +830,56 @@ function bhanuStartLiveLine(id, symbol){
   window.bhanuLiveTimers[id]=setInterval(run,BHANU_TICK_MS);
   run();
 }
+// Live-ticking last candle (Levels/ORB): the in-progress 5m candle
+// moves with the 2s live feed, like Groww/TradingView — close/high/low
+// update on every tick, and a new candle starts on a new 5m bucket.
+// Same /api/live feed and 2s cadence as the home line charts (the
+// poller spark: 2s for indices, 30s for F&O stocks); the 60s full
+// refresh (bhanuCandleUpdate) still re-syncs history. Only the
+// Lightweight Charts path ticks — the SVG fallback is untouched.
+function bhanuCandleLiveTick(id){
+  if(document.hidden||document.body.classList.contains('is-market-closed')){return Promise.resolve();}
+  var st=(window.bhanuCandles||{})[id];
+  if(!st||!st.series||!st.symbol){return Promise.reject(new Error('no candle chart'));}
+  return bhanuFetchJson('/api/live?symbol='+encodeURIComponent(st.symbol)).then(function(p){
+    var cur=(window.bhanuCandles||{})[id];
+    if(!cur||cur!==st||!cur.series){return;}
+    if(!p||p.error||p.ltp===null||p.ltp===undefined){throw new Error(p&&p.error?p.error:'no live data');}
+    var price=Number(p.ltp);
+    if(!(price>0)){throw new Error('no live data');}
+    var candles=(cur.payload&&cur.payload.candles)||[];
+    if(!candles.length){throw new Error('no candle data');}
+    var last=candles[candles.length-1];
+    var nowSec=Math.floor(Date.now()/1000);
+    if(Math.floor(last.time/300)===Math.floor(nowSec/300)){
+      var upd={time:last.time,open:last.open,
+        high:Math.max(last.high,price),low:Math.min(last.low,price),close:price};
+      cur.series.update(upd);
+      candles[candles.length-1]=upd;
+    }else{
+      var nc={time:Math.floor(nowSec/300)*300,open:price,high:price,low:price,close:price};
+      cur.series.update(nc);
+      candles.push(nc);
+    }
+    if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
+  });
+}
+function bhanuStartLiveCandle(id){
+  var st=(window.bhanuCandles||{})[id];
+  if(!st||!st.symbol||window.bhanuLiveTimers[id]){return;}
+  var run=function(){
+    if(document.body.classList.contains('is-market-closed')){return;}
+    bhanuCandleLiveTick(id).catch(function(){});
+  };
+  window.bhanuLiveTimers[id]=setInterval(run,BHANU_TICK_MS);
+  run();
+}
+function bhanuStopLiveCandle(id){
+  if(window.bhanuLiveTimers&&window.bhanuLiveTimers[id]){
+    clearInterval(window.bhanuLiveTimers[id]);
+    delete window.bhanuLiveTimers[id];
+  }
+}
 function bhanuAreaTop(hex){
   var h=String(hex||'#2563eb').replace('#','');
   if(h.length===3){h=h.split('').map(function(c){return c+c;}).join('');}
@@ -1279,6 +1329,10 @@ function bhanuCandleRender(id, p, refreshUrl){
   var st={chart:ch,series:cs,vwap:vw,priceLines:[],boxes:[],wrap:wrap,el:el,payload:p,
     overlays:{orderblock:true,fvg:true,structure:true,liquidity:false,vwap:true,ema:true,volume:true,trades:true}};
   window.bhanuCandles[id]=st;
+  if(refreshUrl){
+    var _sym=(String(refreshUrl).match(/[?&]symbol=([^&]*)/)||[])[1];
+    if(_sym){try{st.symbol=decodeURIComponent(_sym);}catch(e){st.symbol=_sym;}}
+  }
   st.boxes=bhanuCandleBoxes(wrap,p.boxes||[]);
   bhanuCandleApplyOverlays(id);
   bhanuSyncPills(id);
@@ -1296,6 +1350,7 @@ function bhanuCandleRender(id, p, refreshUrl){
     _candleRef._bhanuChartId=id;
     window.bhanuRefreshers.push(_candleRef);
   }
+  bhanuStartLiveCandle(id);
   ch.timeScale().fitContent();layout();
 }
 function bhanuCandleChart(id, refreshUrl){
@@ -1542,6 +1597,7 @@ function bhanuLevelsLoad(querySymbol){
   var headEl=document.getElementById('levels-chart-heading');
   var selEl=document.getElementById('levels-symbol-select');
   var disposeLevelsChart=function(){
+    bhanuStopLiveCandle('levels-chart');
     var old=(window.bhanuCandles||{})['levels-chart'];
     if(old){
       if(old.onResize){try{window.removeEventListener('resize',old.onResize);}catch(e){}}
@@ -3529,10 +3585,16 @@ def _api_robot() -> dict:
 
 def _api_live(query: dict) -> dict:
     symbol = (query.get("symbol") or ["^NSEI"])[0]
+    yahoo_symbol = symbol
     if symbol not in ("^NSEI", "^NSEBANK", "^BSESN"):
-        return {"symbol": symbol, "ltp": None, "line": [],
-                "error": f"unknown symbol {symbol}"}
-    entry = poller_mod.get_spark(symbol)
+        # Display symbols (NIFTY, SBIN, …) resolve through the same
+        # universe map the levelschart endpoint uses, so the candle
+        # live-tick can use this feed for any chart symbol.
+        yahoo_symbol = data_mod.UNIVERSE.get(symbol.upper())
+        if yahoo_symbol is None:
+            return {"symbol": symbol, "ltp": None, "line": [],
+                    "error": f"unknown symbol {symbol}"}
+    entry = poller_mod.get_spark(yahoo_symbol)
     if entry is None:
         return {"symbol": symbol, "ltp": None, "line": [],
                 "error": "live feed warming up — first spark in a few seconds"}
@@ -3540,7 +3602,7 @@ def _api_live(query: dict) -> dict:
     line = [{"time": int(c["t"]), "value": float(c["c"])}
             for c in closes[-400:]]
     ltp = entry.get("ltp")
-    prev = poller_mod.get_prev_close(symbol)
+    prev = poller_mod.get_prev_close(yahoo_symbol)
     if prev is None:
         prev = entry.get("prev")
     pct = round((ltp / prev - 1) * 100, 2) if ltp and prev else None
