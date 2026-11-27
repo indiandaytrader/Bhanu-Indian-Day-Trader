@@ -544,29 +544,54 @@ function bhanuSvgLineLast(el, v){
   if(el._bhanuDot){el._bhanuDot.setAttribute('cx',el._bhanuX(pts.length-1));el._bhanuDot.setAttribute('cy',Yc(v));}
   if(el._bhanuText){el._bhanuText.textContent=Number(v).toLocaleString('en-IN');}
 }
-function bhanuEase(t){return t<0.5?2*t*t:1-Math.pow(-2*t+2,2)/2;}
-function bhanuAnimLast(id, symbol, fromVal, toVal, time){
-  if(document.body.classList.contains('is-market-closed')){return;}
-  var st=window.bhanuLines[id];if(!st){return;}
-  if(fromVal===toVal){return;}
+// Continuous-motion live line: ONE requestAnimationFrame loop per
+// chart, started once, that never stops while the market is open.
+// The fetch only retargets the loop — it never restarts it and never
+// blocks a frame. The glide is LINEAR (constant speed, no ease-in-out
+// brake) and lasts BHANU_GLIDE_MS, longer than the 2 s tick, so the
+// line is still moving when the next tick lands; a new target starts
+// from the value currently on screen, never from the old target, so
+// there is no snap and no dead beat.
+var BHANU_TICK_MS=2000;
+var BHANU_GLIDE_MS=2200;
+function bhanuLineAnim(id, symbol){
+  var st=window.bhanuLines[id];if(!st||st.animRunning){return;}
+  st.animRunning=true;
   var slug={'^NSEI':'nsei','^NSEBANK':'nsebank','^BSESN':'bsesn'}[symbol];
-  var token=(st.animToken||0)+1;st.animToken=token;
   var raf=window.requestAnimationFrame||function(fn){return setTimeout(function(){fn(Date.now());},16);};
-  var start=null;
   function frame(ts){
-    if(document.body.classList.contains('is-market-closed')||st.animToken!==token){return;}
-    if(start===null){start=ts;}
-    var k=Math.min(1,(ts-start)/1900);
-    var v=fromVal+(toVal-fromVal)*bhanuEase(k);
-    if(st.series){try{st.series.update({time:time,value:v});}catch(e){}}
-    else if(st.el){
-      if(!st.el._bhanuPath){bhanuSvgLine(st.el,st.line||[],st.color||'#2563eb');}
-      bhanuSvgLineLast(st.el,v);
+    var cur=window.bhanuLines[id];
+    if(!cur||cur!==st||document.body.classList.contains('is-market-closed')){st.animRunning=false;return;}
+    var now=ts;
+    if(st.animTo!==undefined&&st.animTo!==null&&st.displayed!==undefined&&st.displayed!==null&&st.animTo!==st.displayed){
+      if(st.animStart===undefined||st.animStart===null){st.animStart=now;st.animFrom=st.displayed;}
+      var k=Math.min(1,(now-st.animStart)/BHANU_GLIDE_MS);
+      var v=st.animFrom+(st.animTo-st.animFrom)*k;
+      st.displayed=v;
+      if(st.series){try{st.series.update({time:st.animTime||st.lastTime,value:v});}catch(e){}}
+      else if(st.el){
+        if(!st.el._bhanuPath){bhanuSvgLine(st.el,st.line||[],st.color||'#2563eb');}
+        bhanuSvgLineLast(st.el,v);
+      }
+      if(slug){var pe=document.getElementById('q-'+slug+'-price');if(pe){pe.textContent=Number(v).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}}
+      if(slug){bhanuSparkLast('q-'+slug+'-spark',v);}
+      if(k>=1){st.animStart=null;}
     }
-    if(slug){var pe=document.getElementById('q-'+slug+'-price');if(pe){pe.textContent=Number(v).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}}
-    if(k<1){raf(frame);}
+    raf(frame);
   }
   raf(frame);
+}
+function bhanuLineRetarget(id, symbol, toVal, time){
+  var st=window.bhanuLines[id];if(!st){return;}
+  if(st.displayed===undefined||st.displayed===null){st.displayed=st.lastValue!==undefined&&st.lastValue!==null?st.lastValue:toVal;}
+  if(time!==undefined&&time!==null){st.animTime=time;}
+  // Start the new glide from the value currently on screen, not from
+  // the previous target — that is what removes the snap.
+  st.animFrom=st.displayed;
+  st.animTo=toVal;
+  st.animStart=null;
+  st.lastValue=toVal;
+  bhanuLineAnim(id,symbol);
 }
 function bhanuSvgCandles(el, candles){
   if(!candles||!candles.length){bhanuUnavailable(el,'no price data');return;}
@@ -652,6 +677,7 @@ function bhanuWaterfall(el, series){
 function bhanuSpark(id, points){
   var el=document.getElementById(id);if(!el||!points||points.length<2){return;}
   var pts=points.slice(-120);
+  el._bhanuSparkPts=pts;
   var W=300,H=46,pad=2;
   var vals=pts.map(function(p){return p.value;});
   var mn=Math.min.apply(null,vals),mx=Math.max.apply(null,vals);
@@ -662,18 +688,51 @@ function bhanuSpark(id, points){
   var col=up?'#2f9e5f':'#d6455d';
   var d=pts.map(function(p,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(p.value).toFixed(1);}).join(' ');
   el.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" style="width:100%;height:100%;display:block" role="img" aria-label="Sparkline"><path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="1.5"/><circle cx="'+X(pts.length-1)+'" cy="'+Y(vals[vals.length-1])+'" r="2.5" fill="'+col+'"/></svg>';
+  el._bhanuSparkPath=el.querySelector('path');
+  el._bhanuSparkDot=el.querySelector('circle');
+}
+function bhanuSparkLast(id, v){
+  // Move only the sparkline's last point (called every animation
+  // frame) — no full rebuild, so the top cards glide instead of
+  // jump-cutting every 2 s.
+  var el=document.getElementById(id);if(!el||!el._bhanuSparkPts||!el._bhanuSparkPts.length){return;}
+  var pts=el._bhanuSparkPts;
+  pts[pts.length-1].value=v;
+  var W=300,H=46,pad=2;
+  var vals=pts.map(function(p){return p.value;});
+  var mn=Math.min.apply(null,vals),mx=Math.max.apply(null,vals);
+  if(mx===mn){mx=mn+1;}
+  function X(i){return pad+i/(pts.length-1||1)*(W-2*pad);}
+  function Y(vv){return H-pad-(vv-mn)/(mx-mn)*(H-2*pad);}
+  var d=pts.map(function(p,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(p.value).toFixed(1);}).join(' ');
+  if(el._bhanuSparkPath){
+    el._bhanuSparkPath.setAttribute('d',d);
+    var up=vals[vals.length-1]>=vals[0];
+    var col=up?'#2f9e5f':'#d6455d';
+    el._bhanuSparkPath.setAttribute('stroke',col);
+    if(el._bhanuSparkDot){el._bhanuSparkDot.setAttribute('fill',col);}
+  }
+  if(el._bhanuSparkDot){el._bhanuSparkDot.setAttribute('cx',X(pts.length-1));el._bhanuSparkDot.setAttribute('cy',Y(v));}
 }
 function bhanuSparkFor(symbol, line){
   var map={'^NSEI':'q-nsei-spark','^NSEBANK':'q-nsebank-spark','^BSESN':'q-bsesn-spark'};
   var id=map[symbol];if(!id){return;}
-  try{bhanuSpark(id,line);}catch(e){}
+  try{
+    var el=document.getElementById(id);
+    var pts=el&&el._bhanuSparkPts;
+    // Same 5m bar as before: the animator moves the last point every
+    // frame, so rebuilding the whole SVG here would only jump-cut it.
+    // Rebuild only when a new bar arrives.
+    if(pts&&line&&line.length&&pts.length&&pts[pts.length-1].time===line[line.length-1].time){return;}
+    bhanuSpark(id,line);
+  }catch(e){}
 }
 async function bhanuDetail(url){
   const deadline=Date.now()+180000;
   while(Date.now()<deadline){
     const response=await fetch(url,{headers:{Prefer:'respond-async'},cache:'no-store'});
     if(response.status!==202)return response;
-    await new Promise(resolve=>setTimeout(resolve,1200));
+    await new Promise(resolve=>setTimeout(resolve,500));
   }
   throw Error('Detail feed timed out');
 }
@@ -723,21 +782,15 @@ function bhanuLiveLineTick(id, symbol){
     var t=p.time||0, v=Number(p.ltp);
     var stamp=document.getElementById(id+'-stamp');
     if(stamp){stamp.dataset.tick=t;bhanuTickLabel(stamp);}
-    var from=st.lastValue;
-    if(from===undefined||from===null){
-      var line0=st.line||[];
-      from=line0.length?line0[line0.length-1].value:v;
-    }
     if(st.series){
       if(t>st.lastTime){st.lastTime=t;}
-      bhanuAnimLast(id,symbol,from,v,st.lastTime);
+      bhanuLineRetarget(id,symbol,v,st.lastTime);
     }else if(st.el){
       var line=st.line||[];if(!line.length){throw new Error('no line data');}
       var last=line[line.length-1];
-      if(t>last.time){line.push({time:t,value:from});}
-      bhanuAnimLast(id,symbol,from,v,last.time);
+      if(t>last.time){line.push({time:t,value:(st.displayed!==undefined&&st.displayed!==null?st.displayed:v)});}
+      bhanuLineRetarget(id,symbol,v,t);
     }
-    st.lastValue=v;
     if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
     bhanuSparkFor(symbol,p.line);
   });
@@ -758,6 +811,13 @@ function bhanuStartLiveLine(id, symbol){
           st.line=nl;
           st.lastTime=nl[nl.length-1].time;
           st.lastValue=nl[nl.length-1].value;
+          // Re-seat the animator on the fresh series so the 5-minute
+          // rebuild does not snap the line: displayed == target now.
+          st.displayed=nl[nl.length-1].value;
+          st.animTo=nl[nl.length-1].value;
+          st.animFrom=nl[nl.length-1].value;
+          st.animStart=null;
+          st.animTime=nl[nl.length-1].time;
           st.color=nc;
           if(st.el){bhanuSvgLine(st.el,nl,nc);}
           bhanuSparkFor(symbol,p2.line);
@@ -767,7 +827,7 @@ function bhanuStartLiveLine(id, symbol){
     }
     bhanuLiveLineTick(id,symbol).catch(function(){});
   };
-  window.bhanuLiveTimers[id]=setInterval(run,2000);
+  window.bhanuLiveTimers[id]=setInterval(run,BHANU_TICK_MS);
   run();
 }
 function bhanuAreaTop(hex){
@@ -885,19 +945,55 @@ function bhanuSectorRender(id, p){
   }
   svg+='<line x1="'+padL+'" y1="'+yn.toFixed(1)+'" x2="'+(W-padR)+'" y2="'+yn.toFixed(1)+'" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="6 4"/>';
   svg+='<text x="'+(W-padR)+'" y="'+(yn-5).toFixed(1)+'" text-anchor="end" font-size="11" font-weight="700" fill="#2563eb">NIFTY '+(nifty>=0?'+':'')+nifty.toFixed(2)+'%</text>';
-  p.sectors.forEach(function(s){
+  // Label collision handling: bubbles that sit close together used to
+  // print their names on top of each other ("unprofessional"). Each
+  // label now takes the first free slot (inside / above / below / left
+  // / right of its bubble); the % line is dropped when no slot fits
+  // both lines. Biggest movers claim their slot first.
+  var placed=[];
+  function hitsPlaced(r){for(var i=0;i<placed.length;i++){var q=placed[i];if(r.x0<q.x1&&r.x1>q.x0&&r.y0<q.y1&&r.y1>q.y0)return true;}return false;}
+  function overlapOf(r){var a=0;for(var i=0;i<placed.length;i++){var q=placed[i];a+=Math.max(0,Math.min(r.x1,q.x1)-Math.max(r.x0,q.x0))*Math.max(0,Math.min(r.y1,q.y1)-Math.max(r.y0,q.y0));}return a;}
+  var ordered=p.sectors.slice().sort(function(a,b){return Math.abs(b.change_pct)-Math.abs(a.change_pct);});
+  ordered.forEach(function(s){
     var r=16+40*Math.sqrt((s.traded_value||1)/maxV);
     var cx=X(s.rel_pct===null?0:s.rel_pct),cy=Y(s.change_pct);
     var col=s.up?'#2f9e5f':'#d6455d';
     var top=s.top_member||(s.members&&s.members[0])||'';
-    svg+='<a href="/stock?symbol='+encodeURIComponent(top)+'&lang='+bhanuLang()+'" style="cursor:pointer"><title>'+s.name+' — top stock '+top+' — detail page kholo</title>';
+    var nameW=s.name.length*7.2+6, pctW=58;
+    var pctTxt=(s.change_pct>=0?'+':'')+s.change_pct.toFixed(2)+'%';
+    var runSvg='';
     if(s.rel_pct!==null&&s.rel_pct>1){
-      svg+='<text x="'+cx.toFixed(1)+'" y="'+(cy-r-8).toFixed(1)+'" text-anchor="middle" font-size="9" font-weight="800" fill="'+col+'">RUNNING</text>';
+      var runR={x0:cx-32,y0:cy-r-18,x1:cx+32,y1:cy-r-6};
+      if(!hitsPlaced(runR)){
+        runSvg='<text x="'+cx.toFixed(1)+'" y="'+(cy-r-8).toFixed(1)+'" text-anchor="middle" font-size="9" font-weight="800" fill="'+col+'">RUNNING</text>';
+        placed.push(runR);
+      }
     }
+    var cands=[
+      {dx:0,nameDy:-4,pctDy:12},
+      {dx:0,nameDy:-r-20,pctDy:-r-6},
+      {dx:0,nameDy:r+10,pctDy:r+24},
+      {dx:-(r+nameW/2+14),nameDy:-4,pctDy:12},
+      {dx:(r+nameW/2+14),nameDy:-4,pctDy:12}
+    ];
+    var pick=null;
+    for(var ci=0;ci<cands.length;ci++){
+      var c=cands[ci];
+      var lx=Math.max(padL+nameW/2+2,Math.min(W-padR-nameW/2-2,cx+c.dx));
+      var nr={x0:lx-nameW/2,y0:cy+c.nameDy-11,x1:lx+nameW/2,y1:cy+c.nameDy+3};
+      var pr={x0:lx-pctW/2,y0:cy+c.pctDy-10,x1:lx+pctW/2,y1:cy+c.pctDy+3};
+      if(!hitsPlaced(nr)&&!hitsPlaced(pr)){pick={lx:lx,c:c,nr:nr,pr:pr,showPct:true};break;}
+      var score=overlapOf(nr)+overlapOf(pr);
+      if(!pick||score<pick.score){pick={lx:lx,c:c,nr:nr,pr:pr,showPct:false,score:score};}
+    }
+    svg+='<a href="/stock?symbol='+encodeURIComponent(top)+'&lang='+bhanuLang()+'" style="cursor:pointer"><title>'+s.name+' — top stock '+top+' — detail page kholo</title>';
+    svg+=runSvg;
     svg+='<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="'+r.toFixed(1)+'" fill="'+col+'" fill-opacity="0.55" stroke="'+col+'" stroke-width="2"/>';
-    svg+='<text x="'+cx.toFixed(1)+'" y="'+(cy-4).toFixed(1)+'" text-anchor="middle" font-size="12" font-weight="bold" fill="'+(bhanuDark()?'#fff':'#141a26')+'">'+s.name+'</text>';
-    svg+='<text x="'+cx.toFixed(1)+'" y="'+(cy+12).toFixed(1)+'" text-anchor="middle" font-size="11" fill="'+(bhanuDark()?'#fff':'#141a26')+'">'+(s.change_pct>=0?'+':'')+s.change_pct.toFixed(2)+'%</text>';
+    svg+='<text x="'+pick.lx.toFixed(1)+'" y="'+(cy+pick.c.nameDy).toFixed(1)+'" text-anchor="middle" font-size="12" font-weight="bold" fill="'+(bhanuDark()?'#fff':'#141a26')+'">'+s.name+'</text>';
+    if(pick.showPct){svg+='<text x="'+pick.lx.toFixed(1)+'" y="'+(cy+pick.c.pctDy).toFixed(1)+'" text-anchor="middle" font-size="11" fill="'+(bhanuDark()?'#fff':'#141a26')+'">'+pctTxt+'</text>';}
     svg+='</a>';
+    placed.push(pick.nr);
+    if(pick.showPct)placed.push(pick.pr);
   });
   var cats={'TECH & MEDIA':['IT','Telecom'],'FINANCIALS':['Banks','Financials'],'HEALTHCARE':['Pharma'],'CONSUMPTION':['FMCG','Auto'],'COMMODITIES & ENERGY':['Metals','Energy'],'INDUSTRIALS & PSU':['Infra']};
   Object.keys(cats).forEach(function(c){
@@ -981,13 +1077,66 @@ function bhanuIndicators(id,st){
   st.ema.setData(ema);st.ema.applyOptions({visible:st.overlays.ema!==false});
   if(!st.hist){
     st.hist=st.chart.addHistogramSeries({priceScaleId:'volume',priceFormat:{type:'volume'},color:'#5793ad',priceLineVisible:false,lastValueVisible:false});
-    st.hist.priceScale().applyOptions({scaleMargins:{top:0.82,bottom:0}});
   }
   st.hist.setData(vol);st.hist.applyOptions({visible:st.overlays.volume!==false});
+  // RSI (14) + MACD (12,26,9) panes — server-computed from the drawn
+  // bars, so they show on every candle chart (Levels, ORB, stock
+  // detail), not just on home. Empty early in the session: the panes
+  // collapse and the price pane takes the room.
+  const rsi=p.rsi||[], macd=p.macd||{line:[],signal:[],hist:[]};
+  const hasRsi=rsi.length>0, hasMacd=(macd.line||[]).length>0;
+  if(hasRsi&&!st.rsi){
+    st.rsi=st.chart.addLineSeries({priceScaleId:'rsi',color:'#7e57c2',lineWidth:2,priceLineVisible:false,lastValueVisible:true});
+    st.rsi.createPriceLine({price:70,color:'#d6455d',lineWidth:1,lineStyle:2,title:'70',axisLabelVisible:true});
+    st.rsi.createPriceLine({price:30,color:'#2f9e5f',lineWidth:1,lineStyle:2,title:'30',axisLabelVisible:true});
+  }
+  if(st.rsi){st.rsi.setData(rsi);st.rsi.applyOptions({visible:st.overlays.rsi!==false});}
+  if(hasMacd&&!st.macdLine){
+    st.macdLine=st.chart.addLineSeries({priceScaleId:'macd',color:'#2563eb',lineWidth:2,priceLineVisible:false,lastValueVisible:true});
+    st.macdSig=st.chart.addLineSeries({priceScaleId:'macd',color:'#c18013',lineWidth:1,priceLineVisible:false,lastValueVisible:false});
+    st.macdHist=st.chart.addHistogramSeries({priceScaleId:'macd',priceFormat:{type:'price'},priceLineVisible:false,lastValueVisible:false});
+  }
+  if(st.macdLine){
+    st.macdLine.setData(macd.line||[]);st.macdLine.applyOptions({visible:st.overlays.macd!==false});
+    st.macdSig.setData(macd.signal||[]);st.macdSig.applyOptions({visible:st.overlays.macd!==false});
+    st.macdHist.setData(macd.hist||[]);st.macdHist.applyOptions({visible:st.overlays.macd!==false});
+  }
+  // Pane layout: price on top, MACD / RSI panes below, volume at the
+  // very bottom. Panes with no data collapse (price takes the room).
+  var priceBottom=0.18, macdTop=0.74, macdBottom=0.12, rsiTop=0.74, rsiBottom=0.12, volTop=0.82;
+  if(hasMacd&&hasRsi){priceBottom=0.40;macdTop=0.62;macdBottom=0.24;rsiTop=0.78;rsiBottom=0.08;volTop=0.92;}
+  else if(hasMacd){priceBottom=0.28;macdTop=0.74;macdBottom=0.12;volTop=0.90;}
+  else if(hasRsi){priceBottom=0.28;rsiTop=0.74;rsiBottom=0.12;volTop=0.90;}
+  st.chart.priceScale('right').applyOptions({scaleMargins:{top:0,bottom:priceBottom}});
+  if(hasMacd){st.chart.priceScale('macd').applyOptions({scaleMargins:{top:macdTop,bottom:macdBottom}});}
+  if(hasRsi){st.chart.priceScale('rsi').applyOptions({scaleMargins:{top:rsiTop,bottom:rsiBottom}});}
+  st.hist.priceScale().applyOptions({scaleMargins:{top:volTop,bottom:0}});
   const label=document.getElementById(id+'-indicators');
   const last=candles[candles.length-1];
   const barTime=new Date(last.time*1000).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',hour12:false});
-  if(label)label.textContent=['Last bar '+barTime+' IST',ema.length?'EMA 20':'EMA 20 needs 20 bars',p.vwap&&p.vwap.length?'VWAP':'VWAP unavailable',vol.length?'Reported volume':'Volume unavailable'].join(' · ');
+  var parts=['Last bar '+barTime+' IST',ema.length?'EMA 20':'EMA 20 needs 20 bars',p.vwap&&p.vwap.length?'VWAP':'VWAP unavailable',vol.length?'Reported volume':'Volume unavailable'];
+  if(hasRsi)parts.push('RSI 14: '+p.rsi_last);
+  if(hasMacd)parts.push('MACD: '+(p.macd_last>=0?'+':'')+p.macd_last+(p.macd_signal_last!==null&&p.macd_signal_last!==undefined?' / signal '+(p.macd_signal_last>=0?'+':'')+p.macd_signal_last:''));
+  if(p.note)parts.push(p.note);
+  if(label)label.textContent=parts.join(' · ');
+}
+function bhanuSyncPills(id){
+  // Enable/disable the overlay pills for one chart from its payload's
+  // availability flags (a pill with no data says "unavailable" instead
+  // of toggling nothing). Works for the stock page and the Levels/ORB
+  // pill rows alike; with no chart yet, all pills are disabled.
+  var st=(window.bhanuCandles||{})[id];
+  var ov=st&&st.payload?st.payload.overlays||{}:{};
+  document.querySelectorAll('[data-chart="'+id+'"][data-ov]').forEach(function(b){
+    var k=b.dataset.ov, avail=ov[k]!==false;
+    if(!st||!st.payload){avail=false;}
+    else if(k==='volume'){avail=Boolean(st.payload.volume&&st.payload.volume.length);}
+    else if(k==='ema'){avail=Boolean(st.payload.candles&&st.payload.candles.length>=20);}
+    else if(k==='rsi'){avail=Boolean(st.payload.rsi&&st.payload.rsi.length);}
+    else if(k==='macd'){avail=Boolean(st.payload.macd&&st.payload.macd.line&&st.payload.macd.line.length);}
+    b.disabled=!avail;
+    if(!avail){b.classList.remove('on');}else{b.classList.add('on');}
+  });
 }
 function bhanuCandleApplyOverlays(id){
   var st=(window.bhanuCandles||{})[id];
@@ -1044,16 +1193,8 @@ function bhanuStockLoad(symbol, interval){
     if(sc){sc.innerHTML=d.setup_html||'<p class="muted">Setup unavailable.</p>';}
     var sm=document.getElementById('stock-summary');
     if(sm){sm.innerHTML=d.summary_html||'';}
-    var ov=d.chart&&d.chart.overlays?d.chart.overlays:{};
-    document.querySelectorAll('#stock-pills .opill').forEach(function(b){
-      var k=b.dataset.ov;
-      var avail=ov[k]!==false;
-      if(k==='volume')avail=Boolean(d.chart&&d.chart.volume&&d.chart.volume.length);
-      if(k==='ema')avail=Boolean(d.chart&&d.chart.candles&&d.chart.candles.length>=20);
-      b.disabled=!avail;
-      if(!avail){b.classList.remove('on');}
-      else{b.classList.add('on');}
-    });
+    // Pills are synced by bhanuSyncPills() once the chart renders
+    // (it reads the payload's availability flags); nothing to do here.
     var st=(window.bhanuCandles||{})['stock-chart'];
     if(st&&st.chart){window.removeEventListener('resize',st.onResize);st.boxes.forEach(b=>b.el.remove());try{st.chart.remove();}catch(e){} delete window.bhanuCandles['stock-chart'];}
     var el=document.getElementById('stock-chart');
@@ -1084,6 +1225,7 @@ function bhanuStockLoad(symbol, interval){
       }
     }else if(el){
       bhanuUnavailable(el,d.chart&&d.chart.error?d.chart.error:'no chart data');
+      bhanuSyncPills('stock-chart');
     }
     if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
   }).catch(function(e){
@@ -1100,6 +1242,7 @@ function bhanuCandleUpdate(id, p){
   st.boxes.forEach(function(b){if(b.el.parentNode){b.el.parentNode.removeChild(b.el);}});
   st.boxes=bhanuCandleBoxes(st.wrap,p.boxes||[]);
   bhanuCandleApplyOverlays(id);
+  bhanuSyncPills(id);
 }
 function bhanuCandleRender(id, p, refreshUrl){
   var wrap=document.getElementById(id+'-wrap');var el=document.getElementById(id);
@@ -1138,6 +1281,7 @@ function bhanuCandleRender(id, p, refreshUrl){
   window.bhanuCandles[id]=st;
   st.boxes=bhanuCandleBoxes(wrap,p.boxes||[]);
   bhanuCandleApplyOverlays(id);
+  bhanuSyncPills(id);
   function layout(){bhanuCandleLayout(st);}
   ch.timeScale().subscribeVisibleTimeRangeChange(layout);
   ch.timeScale().subscribeVisibleLogicalRangeChange(layout);
@@ -1377,7 +1521,7 @@ function bhanuOrbLoad(querySymbol){
       if(!d||!d.html){throw new Error(d&&d.error?d.error:'no scan data');}
       table.innerHTML=d.html;
       if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
-      if(!querySymbol){pick(d.top_symbol);}
+      if(!querySymbol){pick(d.top_symbol||'NIFTY');}
     }).catch(function(e){table.innerHTML='<p class="muted">ORB scan load nahi ho paya — page refresh karein.</p>';});
   }
 }
@@ -1519,9 +1663,26 @@ def _candle_chart_block(chart_id: str, symbol: str, note: str | None = None,
             f"<div class='tf-toolbar'><div class='tf-group'>{btns}</div>"
             f"<span class='muted mono' style='font-size:11px'>Support / Resistance · Entry / SL / TP</span></div>"
         )
+    pills_html = ""
+    if tf_page in ("orb", "levels"):
+        # Same overlay pills as the stock detail page (it had them;
+        # Levels/ORB had none, so their indicators could not be seen
+        # or toggled). Synced by bhanuSyncPills() after the chart loads.
+        pills_html = (
+            f"<div id='{chart_id}-pills' style='margin-top:8px'>" + "".join(
+                f"<button type='button' class='opill on' data-chart='{chart_id}' data-ov='{key}' "
+                f"onclick=\"bhanuToggleOverlay('{chart_id}','{key}',this)\">{label}</button>"
+                for key, label in (
+                    ("orderblock", "Order block"), ("fvg", "Fair value gaps"),
+                    ("structure", "Structure"), ("vwap", "VWAP"),
+                    ("ema", "EMA 20"), ("rsi", "RSI"), ("macd", "MACD"),
+                    ("volume", "Volume"), ("trades", "Trades"),
+                )
+            ) + "</div>"
+        )
     return (
         f"<div class='card'><h3 id='{chart_id}-heading'>{heading}</h3>"
-        f"{tf_html}"
+        f"{tf_html}{pills_html}"
         f"<p class='muted'>{note_html}</p><p class='feed-stamp' id='{chart_id}-indicators'>Indicators awaiting candles</p>"
         f"<div id='{chart_id}-wrap' class='chart-wrap'>"
         f"<div id='{chart_id}' class='chart-box tall'>"
@@ -2249,12 +2410,13 @@ def stock_page(lang: str, query: dict | None = None) -> str:
         for iv in ("1m", "5m", "15m", "1H", "D")
     )
     pills = "".join(
-        f"<button class='opill on' data-ov='{key}' "
+        f"<button class='opill on' data-chart='stock-chart' data-ov='{key}' "
         f"onclick=\"bhanuToggleOverlay('stock-chart','{key}',this)\">{label}</button>"
         for key, label in (
             ("orderblock", "Order block"), ("fvg", "Fair value gaps"),
             ("structure", "Structure"), ("liquidity", "Liquidity"),
-            ("vwap", "VWAP"), ("ema", "EMA 20"), ("volume", "Volume"), ("trades", "Trades"),
+            ("vwap", "VWAP"), ("ema", "EMA 20"), ("rsi", "RSI"), ("macd", "MACD"),
+            ("volume", "Volume"), ("trades", "Trades"),
         )
     )
     note = (
@@ -2294,16 +2456,30 @@ def _api_stock(query: dict) -> dict:
         return {"symbol": symbol_q, "error": str(exc)}
 
     def _build() -> dict:
-        try:
-            q = data_mod.fetch_quote(yahoo_symbol)
-            price, prev_close, change_pct = (
-                q.get("price"), q.get("prev_close"), q.get("change_pct"))
-        except Exception:  # noqa: BLE001
-            price = prev_close = change_pct = None
+        # Live price: the poller's 2s spark for indices (freshest, no
+        # extra Yahoo call); otherwise the cached Yahoo quote (60s).
+        # Previously this fetched a fresh Yahoo quote on EVERY stock
+        # load, which was the slowest part of the detail page.
+        price = prev_close = change_pct = None
+        if yahoo_symbol in ("^NSEI", "^NSEBANK", "^BSESN"):
+            spark = poller_mod.get_spark(yahoo_symbol)
+            if spark is not None and spark.get("ltp") is not None:
+                price = spark.get("ltp")
+                prev_close = poller_mod.get_prev_close(yahoo_symbol) or spark.get("prev")
+                if price and prev_close:
+                    change_pct = round((price / prev_close - 1) * 100, 2)
+        if price is None:
+            try:
+                q = _cached(f"quote:{yahoo_symbol}", 60,
+                            lambda: data_mod.fetch_quote(yahoo_symbol))
+                price, prev_close, change_pct = (
+                    q.get("price"), q.get("prev_close"), q.get("change_pct"))
+            except Exception:  # noqa: BLE001
+                price = prev_close = change_pct = None
         flow = poller_mod.get_flow()
         if flow is None and not poller_mod.is_running():
             try:
-                flow = _cached("api:flow", 300, charts_mod.flow_series)
+                flow = _cached("api:flow", 120, charts_mod.flow_series)
             except Exception:  # noqa: BLE001
                 flow = None
         rank = stock_mod.rank_in_flow(label, flow) if in_universe else None
@@ -2960,7 +3136,7 @@ def _api_flow() -> dict:
     if poller_mod.is_running():
         return {"series": [], "failed": [], "error": "Flow feed warming up"}
     try:
-        return _cached("api:flow", 300, charts_mod.flow_series)
+        return _cached("api:flow", 120, charts_mod.flow_series)
     except Exception as exc:  # noqa: BLE001
         return {"series": [], "failed": [], "error": str(exc)}
 
@@ -2972,7 +3148,7 @@ def _api_sectors() -> dict:
     if poller_mod.is_running():
         return {"sectors": [], "failed": [], "error": "Sector feed warming up"}
     try:
-        flow = _cached("api:flow", 300, charts_mod.flow_series)
+        flow = _cached("api:flow", 120, charts_mod.flow_series)
         return charts_mod.sector_map(flow)
     except Exception as exc:  # noqa: BLE001
         return {"sectors": [], "failed": [], "error": str(exc)}
@@ -3046,7 +3222,20 @@ def _api_orbchart(query: dict) -> dict:
         None,
     )
     if picked is None:
-        return {"symbol": symbol, "candles": [], "error": f"no ORB hit for {symbol}"}
+        # No breakout for this symbol yet: return the range-only chart
+        # (candles + ORB range lines + a note) so the page renders and
+        # keeps updating — never an empty error payload that freezes
+        # the chart on its retry loop.
+        yahoo_symbol = data_mod.UNIVERSE.get(symbol)
+        if yahoo_symbol is None:
+            return {"symbol": symbol, "candles": [], "error": f"no ORB hit for {symbol}"}
+        try:
+            return _cached(
+                f"orbchart:{yahoo_symbol}", 60,
+                lambda: charts_mod.orb_chart(yahoo_symbol, symbol),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"symbol": symbol, "candles": [], "error": str(exc)}
     try:
         return _cached(
             f"orbchart:{picked['yahoo_symbol']}", 60,
