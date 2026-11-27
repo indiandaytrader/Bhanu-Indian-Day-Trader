@@ -592,7 +592,8 @@ function bhanuSvgFlow(el, series){
   function X(i){return padL+i/(maxLen-1||1)*(W-padL-padR);}
   function Y(v){return padT+(mx-v)/(mx-mn)*(H-padT-padB);}
   function fmtT(t){try{return new Date(t*1000).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});}catch(e){return '';}}
-  var s='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Smart Money Flow — every stock since the open">';
+  var s='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Smart Money Flow — every stock since the open">'
+    +'<defs><clipPath id="bhanu-flow-clip"><rect x="'+padL+'" y="'+padT+'" width="'+(W-padL-padR)+'" height="'+(H-padT-padB)+'"/></clipPath></defs>';
   var step=1;
   for(var g=Math.ceil(mn/step)*step;g<=mx;g+=step){
     s+='<line x1="'+padL+'" y1="'+Y(g).toFixed(1)+'" x2="'+(W-padR)+'" y2="'+Y(g).toFixed(1)+'" stroke="'+(g===0?'#999':'#e5e7eb')+'" stroke-width="'+(g===0?'1.5':'1')+'"/>';
@@ -604,12 +605,16 @@ function bhanuSvgFlow(el, series){
     if(t){s+='<text x="'+X(idx).toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle" font-size="10" fill="#6b7385">'+fmtT(t.time)+'</text>';}
   });
   var ordered=series.slice().sort(function(a,b){return (a.is_index?1:0)-(b.is_index?1:0);});
+  // Clip the spaghetti to the plot area: a stock that moves past the
+  // axis range must be cut at the chart edge, never drawn outside it.
+  var lines='';
   ordered.forEach(function(ser){
     var col=ser.is_index?'#2563eb':(ser.up?'#2f9e5f':'#d6455d');
     var d=ser.line.map(function(p,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(p.value).toFixed(1);}).join(' ');
     var lastV=ser.line[ser.line.length-1].value;
-    s+='<a href="/stock?symbol='+encodeURIComponent(ser.symbol)+'&lang='+bhanuLang()+'" style="cursor:pointer"><title>'+ser.symbol+' '+(lastV>=0?'+':'')+lastV.toFixed(2)+'% — detail page kholo</title><path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="'+(ser.is_index?2:1)+'"'+(ser.is_index?' stroke-dasharray="6 4"':'')+' opacity="'+(ser.is_index?1:0.55)+'"/></a>';
+    lines+='<a href="/stock?symbol='+encodeURIComponent(ser.symbol)+'&lang='+bhanuLang()+'" style="cursor:pointer"><title>'+ser.symbol+' '+(lastV>=0?'+':'')+lastV.toFixed(2)+'% — detail page kholo</title><path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="'+(ser.is_index?2:1)+'"'+(ser.is_index?' stroke-dasharray="6 4"':'')+' opacity="'+(ser.is_index?1:0.55)+'"/></a>';
   });
+  s+='<g clip-path="url(#bhanu-flow-clip)">'+lines+'</g>';
   var bySec={};
   series.forEach(function(ser){if(ser.is_index||!ser.sector){return;}var v=ser.line[ser.line.length-1].value;(bySec[ser.sector]=bySec[ser.sector]||[]).push(v);});
   var labs=Object.keys(bySec).map(function(k){var vs=bySec[k].slice().sort(function(a,b){return a-b;});return {name:k,v:vs[Math.floor(vs.length/2)]};}).sort(function(a,b){return b.v-a.v;});
@@ -1092,6 +1097,24 @@ function bhanuStockLoad(symbol, interval){
     host.innerHTML='<p class="muted">Stock data load nahi ho paya — page refresh karein.</p>';
   });
 }
+function bhanuCandleScaleAnchor(st){
+  // Invisible series that pins the price scale to the setup boxes
+  // (TARGET top / STOP bottom): Lightweight Charts autoscale only
+  // counts series data, so without this a TARGET above the candles
+  // is cut off at the top of the chart. Transparent, no price line,
+  // no marker — it only widens the scale.
+  if(st.anchor){try{st.chart.removeSeries(st.anchor);}catch(e){}st.anchor=null;}
+  var boxes=(st.payload&&st.payload.boxes)||[];
+  var candles=(st.payload&&st.payload.candles)||[];
+  if(!boxes.length||!candles.length){return;}
+  var hi=-Infinity,lo=Infinity;
+  boxes.forEach(function(b){if(b.top>hi){hi=b.top;}if(b.bottom<lo){lo=b.bottom;}});
+  if(!isFinite(hi)||!isFinite(lo)){return;}
+  var t0=candles[0].time,t1=candles[candles.length-1].time;
+  var anchor=st.chart.addLineSeries({color:'rgba(0,0,0,0)',lineWidth:1,priceLineVisible:false,lastValueVisible:false,crosshairMarkerVisible:false});
+  anchor.setData([{time:t0,value:hi},{time:t1,value:lo}]);
+  st.anchor=anchor;
+}
 function bhanuCandleUpdate(id, p){
   var st=(window.bhanuCandles||{})[id];
   if(!st){throw new Error('no candle chart');}
@@ -1100,6 +1123,10 @@ function bhanuCandleUpdate(id, p){
   st.payload=p;
   st.boxes.forEach(function(b){if(b.el.parentNode){b.el.parentNode.removeChild(b.el);}});
   st.boxes=bhanuCandleBoxes(st.wrap,p.boxes||[]);
+  bhanuCandleScaleAnchor(st);
+  // Follow the live candle: a fresh bar must come into view instead
+  // of sitting off-screen to the right (the chart looked frozen).
+  try{st.chart.timeScale().scrollToRealTime();}catch(e){}
   bhanuCandleApplyOverlays(id);
 }
 function bhanuCandleRender(id, p, refreshUrl){
@@ -1136,6 +1163,7 @@ function bhanuCandleRender(id, p, refreshUrl){
     overlays:{orderblock:true,fvg:true,structure:true,liquidity:false,vwap:true,ema:true,volume:true,trades:true}};
   window.bhanuCandles[id]=st;
   st.boxes=bhanuCandleBoxes(wrap,p.boxes||[]);
+  bhanuCandleScaleAnchor(st);
   bhanuCandleApplyOverlays(id);
   function layout(){bhanuCandleLayout(st);}
   ch.timeScale().subscribeVisibleTimeRangeChange(layout);
@@ -1593,6 +1621,7 @@ def _news_feed_html(lang: str, news: dict | None = None) -> str:
     source_line = (
         f"Real-time check — NSE announcements: "
         f"{sources.get('nse_announcements', 'unavailable')}; "
+        f"Google News: {sources.get('google_news', 'unavailable')}; "
         f"Yahoo headlines: {sources.get('yahoo_headlines', 'unavailable')}; "
         f"Marketaux: {mx_status}."
     )
