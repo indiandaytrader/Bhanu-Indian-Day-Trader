@@ -4,7 +4,9 @@ Sources (best effort, public, unofficial):
     * PRIMARY — NSE / BSE exchange announcements (corporate
       announcements and results). These are the exchange's own record
       of what a listed company disclosed.
-    * SECONDARY — Yahoo India headlines RSS per symbol.
+    * SECONDARY — Google News RSS per symbol (live, no key): the
+      fresh headlines. Yahoo India headlines RSS is kept as a
+      fallback, but it often serves days-old items.
     * TERTIARY — Marketaux (optional, needs a free API key in
       ``MARKETAUX_API_KEY``): global financial news with per-entity
       sentiment scores (-1..+1). Free plan: 100 requests/day, 3
@@ -307,6 +309,65 @@ def fetch_yahoo_headlines(symbol: str) -> tuple[list[dict[str, Any]], str]:
     )
 
 
+def fetch_google_news(symbol: str) -> tuple[list[dict[str, Any]], str]:
+    """Live headlines for ``symbol`` from Google News RSS (free, no key).
+
+    Yahoo's India headline RSS often serves days-old items, so Google
+    News RSS is the live source: it returns genuinely recent headlines
+    (last few hours) with no API key. Returns ``(items, note)``.
+    """
+    display = symbol.replace(".NS", "").upper()
+    query = {
+        "NIFTY": "Nifty 50",
+        "BANKNIFTY": "Bank Nifty",
+        "SENSEX": "Sensex",
+    }.get(display, display)
+    url = (
+        "https://news.google.com/rss/search?q="
+        + urllib.parse.quote(query)
+        + "&hl=en-IN&gl=IN&ceid=IN:en"
+    )
+    try:
+        raw = _http_get(url)
+        root = ET.fromstring(raw)
+    except Exception as exc:  # noqa: BLE001 - best effort
+        return [], f"Google News RSS unavailable: {exc}"
+    items: list[dict[str, Any]] = []
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        pub_date = (item.findtext("pubDate") or "").strip()
+        src_el = item.find("source")
+        src = (src_el.text or "").strip() if src_el is not None else ""
+        if not title:
+            continue
+        items.append(
+            {
+                "source": "Google News" + (f" · {src}" if src else ""),
+                "title": title,
+                "link": link,
+                "published": pub_date,
+                "tags": tag_text(title),
+                "sentiment": None,
+            }
+        )
+    if items:
+        # Newest first — the RSS order is a relevance mix, so sort by
+        # published date so today's headlines sit at the top.
+        def _pub_ts(it: dict[str, Any]) -> float:
+            try:
+                from email.utils import parsedate_to_datetime
+
+                dt = parsedate_to_datetime(it.get("published") or "")
+                return dt.timestamp() if dt is not None else 0.0
+            except Exception:  # noqa: BLE001 - keep original order
+                return 0.0
+
+        items.sort(key=_pub_ts, reverse=True)
+        return items, ""
+    return [], "no Google News items returned for this symbol"
+
+
 # ---------------------------------------------------------------------------
 # Marketaux (optional, key-gated — extra news + per-entity sentiment)
 # ---------------------------------------------------------------------------
@@ -539,13 +600,16 @@ def check_symbol(symbol: str, marketaux: bool | None = None) -> dict[str, Any]:
             "(free-tier limit)"
         )
     yahoo_items, yahoo_note = fetch_yahoo_headlines(yahoo_symbol)
+    # Google News RSS is the live headline source (Yahoo's India RSS
+    # often serves days-old items) — free, no API key.
+    gnews_items, gnews_note = fetch_google_news(yahoo_symbol)
 
     # Dedupe against the 30-day state file.
     state = _load_state()
     seen: dict[str, str] = state.get("seen", {})
     now_iso = datetime.now(timezone.utc).isoformat()
     new_items: list[dict[str, Any]] = []
-    for item in nse_items + mx_items + yahoo_items:
+    for item in nse_items + mx_items + gnews_items + yahoo_items:
         item_id = _item_id(item["source"], item["title"], item["link"])
         if item_id in seen:
             continue
@@ -565,10 +629,11 @@ def check_symbol(symbol: str, marketaux: bool | None = None) -> dict[str, Any]:
         # regardless of the 30-day dedupe — for dashboard display, so the
         # latest headlines stay visible even after they were first seen.
         # "items" above is the new/unseen set only (alerts, not a feed).
-        "latest": (nse_items + mx_items + yahoo_items)[:5],
+        "latest": (nse_items + mx_items + gnews_items + yahoo_items)[:5],
         "sources": {
             "nse_announcements": nse_note or f"{len(nse_items)} item(s)",
             "bse_announcements": bse_note,
+            "google_news": gnews_note or f"{len(gnews_items)} item(s)",
             "yahoo_headlines": yahoo_note or f"{len(yahoo_items)} item(s)",
             "marketaux": mx_note or f"{len(mx_items)} item(s)",
         },
