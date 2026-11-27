@@ -1077,8 +1077,43 @@
     saveStorage(STORAGE_KEYS.paper, state.paper);
   }
 
+  // Paper desk live price for the selected symbol (from /api/quote).
+  // Used by BUY CALL / BUY PUT / SELL when the Entry field is blank.
+  const paperLive = { symbol: null, price: null };
+
+  function updatePaperLivePrice() {
+    const symEl = $('pro-paper-symbol');
+    const priceEl = $('pro-paper-live-price');
+    if (!symEl) return;
+    const symbol = (symEl.value || 'NIFTY').trim().toUpperCase();
+    if (priceEl) priceEl.textContent = 'Live price: load ho raha hai…';
+    fetchJson('/api/quote?symbol=' + encodeURIComponent(symbol), 15000).then(function (q) {
+      if (!q || q.error || q.price === null || q.price === undefined) {
+        throw new Error((q && q.error) || 'no live price');
+      }
+      paperLive.symbol = symbol;
+      paperLive.price = Number(q.price);
+      if (priceEl) {
+        const pct = (q.change_pct === null || q.change_pct === undefined)
+          ? '' : ' (' + (q.change_pct >= 0 ? '+' : '') + Number(q.change_pct).toFixed(2) + '%)';
+        priceEl.textContent = 'Live price: ₹' + fmtNum(Number(q.price)) + pct;
+      }
+    }).catch(function () {
+      paperLive.symbol = null;
+      paperLive.price = null;
+      if (priceEl) priceEl.textContent = 'Live price: unavailable — Entry ₹ khud daalein.';
+    });
+  }
+
+  function paperSymbolChanged() {
+    updatePaperLivePrice();
+  }
+
   function resolveLivePriceForSymbol(sym) {
     const s = String(sym || '').toUpperCase();
+    if (paperLive.symbol === s && paperLive.price) {
+      return Number(paperLive.price);
+    }
     if (s.indexOf('BANKNIFTY') !== -1 && state.quotes['^NSEBANK'] && state.quotes['^NSEBANK'].price) {
       return Number(state.quotes['^NSEBANK'].price);
     }
@@ -1566,6 +1601,11 @@
     calcRiskGuardian();
     renderJournal();
     updateChecklistBadge();
+    // Paper desk: show the selected symbol's live price, refresh every 5s.
+    if ($('pro-paper-symbol')) {
+      updatePaperLivePrice();
+      state.timers.paperQuote = setInterval(updatePaperLivePrice, 5000);
+    }
     if (state.killSwitch) {
       const banner = $('pro-kill-banner');
       if (banner) banner.classList.add('active');
@@ -1601,6 +1641,7 @@
     rescanBot: triggerBotRescan,
     submitTimeMachine: submitTimeMachineCheck,
     placePaperOrder: placePaperOrder,
+    paperSymbolChanged: paperSymbolChanged,
     squareOff: squareOffPosition,
     calcRiskGuardian: calcRiskGuardian,
     toggleKillSwitch: toggleKillSwitch,
