@@ -196,8 +196,8 @@ def _bottom_nav_html(lang: str, active: str) -> str:
 
 def _page(lang: str, title: str, body: str, head_extra: str = "", scripts: str = "",
           live: bool = False, active: str = "") -> str:
-    """Page shell. Default theme is white/light (`data-theme="light"`),
-    with instant dark toggle persisted in localStorage. ``live=True`` adds
+    """Page shell. Default theme is dark (`data-theme="dark"`),
+    with instant light toggle persisted in localStorage. ``live=True`` adds
     the LIVE indicator + auto-refresh engine (chart pages only)."""
     t = lambda k: i18n_mod.t(k, lang)
     live_html = ""
@@ -228,7 +228,7 @@ def _page(lang: str, title: str, body: str, head_extra: str = "", scripts: str =
         f"<span class='lang'><a href='?lang=en'>EN</a><a href='?lang=hi'>HI</a></span>"
     )
     return f"""<!DOCTYPE html>
-<html lang="en" data-theme="light"><head><meta charset="utf-8">
+<html lang="en" data-theme="dark"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(title)} — Bhanu Indian Day Trader</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -495,7 +495,8 @@ function bhanuChartOpts(h){
   return {width:0,height:h||300,
     layout:{background:{color:'transparent'},textColor:dark?'#c9c9c9':'#333'},
     grid:{vertLines:{color:dark?'#2a2d33':'#eee'},horzLines:{color:dark?'#2a2d33':'#eee'}},
-    timeScale:{timeVisible:true,secondsVisible:false}};
+    rightPriceScale:{borderVisible:false},
+    timeScale:{timeVisible:true,secondsVisible:false,borderVisible:false}};
 }
 function bhanuUnavailable(el,why){
   var message=document.createElement('p');message.className='empty-state';
@@ -510,9 +511,13 @@ function bhanuSvgLine(el, points, color){
   function X(i){return pad+i/(points.length-1||1)*(W-2*pad);}
   function Y(v){return H-pad-(v-mn)/(mx-mn)*(H-2*pad);}
   var d=points.map(function(p,i){return (i?'L':'M')+X(i).toFixed(1)+' '+Y(p.value).toFixed(1);}).join(' ');
+  var col=color||'#2563eb';
+  var areaD='M'+X(0).toFixed(1)+' '+(H-pad)+' '+d.substring(1)+' L'+X(points.length-1).toFixed(1)+' '+(H-pad)+' Z';
   var last=points[points.length-1].value;
-  el.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Price chart (simple view)"><path d="'+d+'" fill="none" stroke="'+(color||'#2563eb')+'" stroke-width="2"/><circle cx="'+X(points.length-1)+'" cy="'+Y(last)+'" r="4" fill="'+(color||'#2563eb')+'"/><text x="'+(W-8)+'" y="18" text-anchor="end" font-size="13" font-weight="bold" fill="'+(bhanuDark()?'#fff':'#111')+'">'+last.toLocaleString('en-IN')+'</text></svg><p class="muted">Simple chart view — full chart library could not load.</p>';
-  el._bhanuPath=el.querySelector('path');
+  el.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Price chart (simple view)"><defs><linearGradient id="bhanuSvgGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="'+col+'" stop-opacity="0.28"/><stop offset="1" stop-color="'+col+'" stop-opacity="0"/></linearGradient></defs><path d="'+areaD+'" fill="url(#bhanuSvgGrad)" stroke="none"/><path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/><circle cx="'+X(points.length-1)+'" cy="'+Y(last)+'" r="4" fill="'+col+'"/><text x="'+(W-8)+'" y="18" text-anchor="end" font-size="13" font-weight="bold" fill="'+(bhanuDark()?'#fff':'#111')+'">'+last.toLocaleString('en-IN')+'</text></svg><p class="muted">Simple chart view — full chart library could not load.</p>';
+  var _paths=el.querySelectorAll('path');
+  el._bhanuArea=_paths[0];
+  el._bhanuPath=_paths[1];
   el._bhanuDot=el.querySelector('circle');
   el._bhanuText=el.querySelector('text');
   el._bhanuPoints=points;
@@ -532,6 +537,10 @@ function bhanuSvgLineLast(el, v){
   }
   var d=pts.map(function(p,i){return (i?'L':'M')+el._bhanuX(i).toFixed(1)+' '+Yc(p.value).toFixed(1);}).join(' ');
   el._bhanuPath.setAttribute('d',d);
+  if(el._bhanuArea){
+    var base=el._bhanuH-(el._bhanuPad||8);
+    el._bhanuArea.setAttribute('d','M'+el._bhanuX(0).toFixed(1)+' '+base+' '+d.substring(1)+' L'+el._bhanuX(pts.length-1).toFixed(1)+' '+base+' Z');
+  }
   if(el._bhanuDot){el._bhanuDot.setAttribute('cx',el._bhanuX(pts.length-1));el._bhanuDot.setAttribute('cy',Yc(v));}
   if(el._bhanuText){el._bhanuText.textContent=Number(v).toLocaleString('en-IN');}
 }
@@ -547,7 +556,7 @@ function bhanuAnimLast(id, symbol, fromVal, toVal, time){
   function frame(ts){
     if(document.body.classList.contains('is-market-closed')||st.animToken!==token){return;}
     if(start===null){start=ts;}
-    var k=Math.min(1,(ts-start)/900);
+    var k=Math.min(1,(ts-start)/1900);
     var v=fromVal+(toVal-fromVal)*bhanuEase(k);
     if(st.series){try{st.series.update({time:time,value:v});}catch(e){}}
     else if(st.el){
@@ -745,7 +754,7 @@ function bhanuStartLiveLine(id, symbol){
         if(p2&&!p2.error&&p2.line&&p2.line.length&&st){
           var nl=p2.line.slice();
           var nc=bhanuDirColor(p2);
-          if(st.series){st.series.setData(nl);if(nc!==st.color){st.series.applyOptions({color:nc});}}
+          if(st.series){st.series.setData(nl);if(nc!==st.color){st.series.applyOptions({lineColor:nc,topColor:bhanuAreaTop(nc)});}}
           st.line=nl;
           st.lastTime=nl[nl.length-1].time;
           st.lastValue=nl[nl.length-1].value;
@@ -760,6 +769,12 @@ function bhanuStartLiveLine(id, symbol){
   };
   window.bhanuLiveTimers[id]=setInterval(run,2000);
   run();
+}
+function bhanuAreaTop(hex){
+  var h=String(hex||'#2563eb').replace('#','');
+  if(h.length===3){h=h.split('').map(function(c){return c+c;}).join('');}
+  var r=parseInt(h.slice(0,2),16)||37,g=parseInt(h.slice(2,4),16)||99,b=parseInt(h.slice(4,6),16)||235;
+  return 'rgba('+r+','+g+','+b+',0.28)';
 }
 function bhanuDirColor(p){
   if(p&&p.color){return p.color;}
@@ -785,7 +800,7 @@ function bhanuLineRender(id, p, symbol){
   }
   var o=bhanuChartOpts(260);o.width=el.clientWidth||900;
   var ch=LightweightCharts.createChart(el,o);
-  var s=ch.addLineSeries({color:col,lineWidth:2});
+  var s=ch.addAreaSeries({lineColor:col,topColor:bhanuAreaTop(col),bottomColor:'rgba(0,0,0,0)',lineWidth:3,crosshairMarkerRadius:5});
   s.setData(p.line);ch.timeScale().fitContent();
   window.addEventListener('resize',function(){ch.applyOptions({width:el.clientWidth||900});});
   window.bhanuLines[id]={el:el,chart:ch,series:s,line:p.line.slice(),lastTime:lastTime,lastValue:lastVal,color:col};
@@ -1095,14 +1110,16 @@ function bhanuCandleRender(id, p, refreshUrl){
     var legend=document.getElementById(id+'-indicators');
     if(legend)legend.textContent='Basic candle view · interactive indicators unavailable';
     if(refreshUrl){
-      window.bhanuRefreshers.push(function(){
+      var _svgRef=function(){
         return bhanuDetail(refreshUrl).then(function(r){
           if(!r.ok){throw new Error('candles '+r.status);}return r.json();
         }).then(function(p2){
           if(!p2||p2.error||!p2.candles||!p2.candles.length){throw new Error(p2&&p2.error?p2.error:'no candle data');}
           bhanuSvgCandles(el,p2.candles);
         });
-      });
+      };
+      _svgRef._bhanuChartId=id;
+      window.bhanuRefreshers.push(_svgRef);
     }
     return;
   }
@@ -1127,11 +1144,13 @@ function bhanuCandleRender(id, p, refreshUrl){
   st.onResize=function(){ch.applyOptions({width:el.clientWidth||900});layout();};
   window.addEventListener('resize',st.onResize);
   if(refreshUrl){
-    window.bhanuRefreshers.push(function(){
+    var _candleRef=function(){
       return bhanuDetail(refreshUrl).then(function(r){
         if(!r.ok){throw new Error('candles '+r.status);}return r.json();
       }).then(function(p2){bhanuCandleUpdate(id,p2);});
-    });
+    };
+    _candleRef._bhanuChartId=id;
+    window.bhanuRefreshers.push(_candleRef);
   }
   ch.timeScale().fitContent();layout();
 }
@@ -1376,13 +1395,38 @@ function bhanuLevelsBreakdown(sym){
 function bhanuLevelsLoad(querySymbol){
   var table=document.getElementById('levels-table');
   var symEl=document.getElementById('levels-chart-symbol');
+  var headEl=document.getElementById('levels-chart-heading');
+  var selEl=document.getElementById('levels-symbol-select');
+  var disposeLevelsChart=function(){
+    var old=(window.bhanuCandles||{})['levels-chart'];
+    if(old){
+      if(old.onResize){try{window.removeEventListener('resize',old.onResize);}catch(e){}}
+      if(old.chart){try{old.chart.remove();}catch(e){}}
+      delete window.bhanuCandles['levels-chart'];
+    }
+    if(window.bhanuRefreshers){
+      window.bhanuRefreshers=window.bhanuRefreshers.filter(function(fn){return fn._bhanuChartId!=='levels-chart';});
+    }
+    var el=document.getElementById('levels-chart');
+    if(el){el.innerHTML='<p class="loading">Chart load ho raha hai…</p>';el.dataset.bhanuLoaded='0';el.dataset.bhanuRetries='0';}
+  };
   var pick=function(sym){
     if(!sym){return;}
+    sym=String(sym).toUpperCase();
+    if(window.bhanuLevelsSymbol && window.bhanuLevelsSymbol!==sym){disposeLevelsChart();}
     window.bhanuLevelsSymbol=sym;
+    if(selEl && selEl.value!==sym){selEl.value=sym;}
     if(symEl){symEl.textContent='Chart symbol: '+sym+' — 5m candles, VWAP, order blocks, S/R.';}
+    if(headEl){headEl.textContent=sym+' — candlestick with overlays';}
+    try{
+      var u=new URL(window.location.href);
+      u.searchParams.set('symbol',sym);
+      window.history.replaceState(null,'',u.toString());
+    }catch(e){}
     bhanuLazyCandle('levels-chart','/api/levelschart?symbol='+encodeURIComponent(sym));
     bhanuLevelsBreakdown(sym);
   };
+  window.bhanuLevelsPick=pick;
   if(querySymbol){pick(querySymbol);}
   if(table){
     fetch('/api/levels').then(function(r){if(!r.ok){throw new Error('levels '+r.status);}return r.json();}).then(function(d){
@@ -1476,7 +1520,7 @@ def _candle_chart_block(chart_id: str, symbol: str, note: str | None = None,
             f"<span class='muted mono' style='font-size:11px'>Support / Resistance · Entry / SL / TP</span></div>"
         )
     return (
-        f"<div class='card'><h3>{heading}</h3>"
+        f"<div class='card'><h3 id='{chart_id}-heading'>{heading}</h3>"
         f"{tf_html}"
         f"<p class='muted'>{note_html}</p><p class='feed-stamp' id='{chart_id}-indicators'>Indicators awaiting candles</p>"
         f"<div id='{chart_id}-wrap' class='chart-wrap'>"
@@ -2093,11 +2137,22 @@ def levels_page(lang: str, query: dict | None = None) -> str:
     """Levels page with visible timeframe switcher (5m/15m/1h/D)."""
     t = lambda k: i18n_mod.t(k, lang)
     wanted = ((query or {}).get("symbol") or ["NIFTY"])[0].upper()
+    options = "".join(
+        f"<option value='{_esc(sym)}'{' selected' if sym == wanted else ''}>{_esc(sym)}</option>"
+        for sym in data_mod.UNIVERSE
+    )
+    selector = (
+        f"<div class='card' style='margin-bottom:10px'><label for='levels-symbol-select' "
+        f"class='muted'>Symbol:&nbsp;</label>"
+        f"<select id='levels-symbol-select' onchange=\"bhanuLevelsPick(this.value)\">{options}</select>"
+        f" <span class='muted'>— kisi bhi index ya F&amp;O stock ke levels dekhein.</span></div>"
+    )
     sym_line = (
         f"<p class='muted' id='levels-chart-symbol'>Chart symbol: {_esc(wanted)} — "
         f"5m candles, VWAP, order blocks, S/R.</p>"
     )
     body = (
+        f"{selector}"
         f"{sym_line}"
         f"{_candle_chart_block('levels-chart', wanted, tf_page='levels')}"
         f"<div id='levels-breakdown'><p class='loading'>Signal breakdown load ho raha hai…</p></div>"
@@ -2823,6 +2878,10 @@ def paper_page(lang: str) -> str:
                 f"<td>Exit check unavailable — {_esc(exc)}</td></tr>"
             )
 
+    paper_options = "".join(
+        f"<option value='{_esc(sym)}'{' selected' if sym == 'NIFTY' else ''}>{_esc(sym)}</option>"
+        for sym in data_mod.UNIVERSE
+    )
     pro_desk_html = (
         "<div class='kill-banner' id='pro-kill-banner'>"
         "<div><b>🚨 KILL-SWITCH ACTIVE:</b> Aaj ka daily loss limit hit ho gaya — revenge trade mat karo.</div>"
@@ -2835,7 +2894,9 @@ def paper_page(lang: str) -> str:
         "<div><small>Realised (Desk)</small><strong id='pro-paper-realized' class='mono'>₹0.00</strong></div>"
         "<div><small>Open Desk</small><strong id='pro-paper-open-count' class='mono'>0</strong></div></div>"
         "<div class='pro-form-grid'>"
-        "<div class='pro-field'><label>Symbol</label><input id='pro-paper-symbol' value='NIFTY' placeholder='NIFTY / RELIANCE'></div>"
+        "<div class='pro-field'><label>Symbol</label><select id='pro-paper-symbol' onchange='BhanuPro.paperSymbolChanged()'>"
+        f"{paper_options}</select>"
+        "<div id='pro-paper-live-price' class='mono muted' style='margin-top:4px;font-size:12px'>Live price: load ho raha hai…</div></div>"
         "<div class='pro-field'><label>Qty</label><input id='pro-paper-qty' type='number' value='50' min='1'></div>"
         "<div class='pro-field'><label>Entry ₹ (blank = live)</label><input id='pro-paper-price' type='number' step='0.05' placeholder='Auto live quote'></div>"
         "<div class='pro-field'><label>Stop Loss ₹</label><input id='pro-paper-sl' type='number' step='0.05' placeholder='Optional SL'></div>"
@@ -2997,9 +3058,9 @@ def _api_orbchart(query: dict) -> dict:
 
 def _api_levelschart(query: dict) -> dict:
     symbol = (query.get("symbol") or ["NIFTY"])[0].upper()
-    yahoo_symbol = data_mod.INDICES.get(symbol)
+    yahoo_symbol = data_mod.UNIVERSE.get(symbol)
     if yahoo_symbol is None:
-        return {"symbol": symbol, "candles": [], "error": f"unknown index {symbol}"}
+        return {"symbol": symbol, "candles": [], "error": f"unknown symbol {symbol}"}
     try:
         return _cached(
             f"levelschart:{symbol}", 60,
@@ -3300,6 +3361,34 @@ def _api_live(query: dict) -> dict:
             "time": entry.get("time") or 0, "line": line, "error": None}
 
 
+def _api_quote(query: dict) -> dict:
+    """Lightweight live quote for one display symbol (Paper Trading desk).
+
+    Indices come from the poller's 2s spark (freshest); F&O stocks come
+    from the cached Yahoo quote (30s TTL). Never invents a price.
+    """
+    symbol_q = (query.get("symbol") or ["NIFTY"])[0]
+    try:
+        label, yahoo_symbol, _in_universe = stock_mod.resolve_symbol(symbol_q)
+    except ValueError as exc:
+        return {"symbol": symbol_q, "price": None, "error": str(exc)}
+    if yahoo_symbol in ("^NSEI", "^NSEBANK", "^BSESN"):
+        spark = poller_mod.get_spark(yahoo_symbol)
+        if spark is not None and spark.get("ltp") is not None:
+            ltp = spark.get("ltp")
+            prev = poller_mod.get_prev_close(yahoo_symbol) or spark.get("prev")
+            pct = round((ltp / prev - 1) * 100, 2) if ltp and prev else None
+            return {"symbol": label, "yahoo_symbol": yahoo_symbol, "price": ltp,
+                    "prev_close": prev, "change_pct": pct, "error": None}
+    try:
+        q = data_mod.fetch_quote(yahoo_symbol)
+    except Exception as exc:  # noqa: BLE001
+        return {"symbol": label, "price": None, "error": str(exc)}
+    return {"symbol": label, "yahoo_symbol": yahoo_symbol, "price": q.get("price"),
+            "prev_close": q.get("prev_close"), "change_pct": q.get("change_pct"),
+            "error": None}
+
+
 def _api_poller() -> dict:
     return poller_mod.status()
 
@@ -3464,6 +3553,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/live":
                 self._send_json(_api_live(query))
+                return
+            if parsed.path == "/api/quote":
+                self._send_json(_api_quote(query))
                 return
             if parsed.path == "/api/poller":
                 self._send_json(_api_poller())
