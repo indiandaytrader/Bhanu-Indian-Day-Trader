@@ -432,7 +432,7 @@
       const anim = state.liveAnim[key];
       if (!anim || anim.token !== token) return;
       if (anim.start === null) anim.start = ts;
-      const k = Math.min(1, (ts - anim.start) / 850);
+      const k = Math.min(1, (ts - anim.start) / 1900);
       const v = fromVal + (toVal - fromVal) * easeInOutQuad(k);
       onStep(v);
       if (k < 1) raf(frame);
@@ -545,10 +545,11 @@
           // Update LightweightCharts if mounted
           const lw = (global.bhanuLines || {})[cid];
           if (lw && lw.series) {
-            const fromVal = lw.lastValue != null ? lw.lastValue : nextVal;
+            const fromVal = lw.displayedValue != null ? lw.displayedValue : (lw.lastValue != null ? lw.lastValue : nextVal);
             if (nextTime > (lw.lastTime || 0)) lw.lastTime = nextTime;
             lw.lastValue = nextVal;
             glideValue('lw:' + cid, fromVal, nextVal, function (v) {
+              lw.displayedValue = v;
               try { lw.series.update({ time: lw.lastTime, value: v }); } catch (e) {}
             });
           }
