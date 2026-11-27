@@ -384,7 +384,7 @@ function bhanuTheme(){{
 }}
 try{{var s=localStorage.getItem('bhanu-theme');if(s){{document.documentElement.setAttribute('data-theme',s);}}}}catch(e){{}}
 </script>
-<script src="/static/pro_terminal.js?v=2" defer></script>
+<script src="/static/pro_terminal.js?v=3" defer></script>
 {scripts}
 </body></html>"""
 
