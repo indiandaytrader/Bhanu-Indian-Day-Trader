@@ -58,6 +58,14 @@ _IST_TZ = ZoneInfo("Asia/Kolkata")
 ORB_RANGE_START = "09:15"
 ORB_RANGE_END = "09:30"  # range bars are 09:15, 09:20, 09:25 (5m bars)
 
+#: Minimum relative volume on the breakout bar (vs. prior session bars' average)
+#: required for ``trade_ready`` confirmation.
+TRADE_READY_MIN_REL_VOL = 1.2
+
+#: Tolerance (as a fraction of price) for detecting a pullback retest of the
+#: ORB breakout level.
+RETEST_TOL_PCT = 0.0015
+
 DAILY_SETUPS = (
     "breakout_20d",
     "bull_flag",
@@ -198,12 +206,107 @@ def orb_range(bars: pd.DataFrame) -> tuple[float, float] | None:
     return float(range_bars["high"].max()), float(range_bars["low"].min())
 
 
-def orb_hit(bars: pd.DataFrame) -> dict[str, Any] | None:
-    """Find the first completed 5m bar closing outside the opening range.
+def _evaluate_breakout_readiness(
+    day_bars: pd.DataFrame,
+    breakout_ts: Any,
+    direction: str,
+    range_high: float,
+    range_low: float,
+) -> tuple[bool, str]:
+    """Compute ``(trade_ready, signal_state)`` for a confirmed ORB breakout.
 
-    Returns ``{"direction": "long"|"short", "close", "bar_time",
-    "range_high", "range_low"}`` or None if no bar has closed outside
-    the range yet. Wicks do not count — only the bar's CLOSE.
+    Exact ``trade_ready`` condition (ALL THREE must hold):
+    1. **Clean breakout close**: the breakout bar closed strictly outside
+       the 09:15-09:30 opening range (``close > range_high`` for long,
+       ``close < range_low`` for short).
+    2. **Volume confirmation**: the breakout bar's volume is at least
+       ``TRADE_READY_MIN_REL_VOL`` (1.2x) of the average volume of the
+       prior bars in today's session (requires positive volume data).
+    3. **Follow-through / retest hold**: at least one completed 5m bar
+       AFTER the breakout bar has closed and the latest close still holds
+       outside the opening range without invalidating through the range
+       midpoint (either continuing in the breakout direction or retesting
+       the broken level and holding).
+
+    ``signal_state`` values:
+    * ``"invalidated"`` — a subsequent bar closed back past the range
+      midpoint against the breakout direction.
+    * ``"confirmed"`` — ``trade_ready`` is True (volume + follow-through).
+    * ``"retested"`` — a subsequent bar pulled back to within
+      ``RETEST_TOL_PCT`` (0.15%) of the breakout level and held outside.
+    * ``"new"`` — fresh breakout with no follow-through bar yet or
+      unconfirmed volume.
+    """
+    if day_bars.empty or breakout_ts not in day_bars.index:
+        return False, "new"
+
+    loc = day_bars.index.get_loc(breakout_ts)
+    if isinstance(loc, slice):
+        loc = loc.start
+    elif not isinstance(loc, int):
+        loc = int(loc[0])
+
+    brk_bar = day_bars.iloc[loc]
+    brk_close = float(brk_bar["close"])
+    mid = (range_high + range_low) / 2.0
+
+    # 1. Clean breakout close outside the opening range.
+    clean_break = (
+        brk_close > range_high if direction == "long" else brk_close < range_low
+    )
+    if not clean_break:
+        return False, "new"
+
+    # 2. Volume confirmation vs. prior bars in today's session.
+    vol_ok = False
+    if "volume" in day_bars.columns and loc > 0:
+        brk_vol = float(brk_bar["volume"]) if pd.notna(brk_bar["volume"]) else 0.0
+        prior_vols = day_bars.iloc[:loc]["volume"].dropna()
+        prior_vols = prior_vols[prior_vols > 0]
+        if brk_vol > 0 and not prior_vols.empty:
+            avg_vol = float(prior_vols.mean())
+            vol_ok = avg_vol > 0 and (brk_vol / avg_vol) >= TRADE_READY_MIN_REL_VOL
+
+    # 3. Subsequent bar progression: invalidation, retest, or hold/continuation.
+    after_bars = day_bars.iloc[loc + 1 :]
+    if after_bars.empty:
+        return False, "new"
+
+    retested = False
+    for _, bar in after_bars.iterrows():
+        c = float(bar["close"])
+        lo = float(bar["low"])
+        hi = float(bar["high"])
+        if direction == "long":
+            if c < mid:
+                return False, "invalidated"
+            if lo <= range_high * (1.0 + RETEST_TOL_PCT) and c > range_high:
+                retested = True
+        else:
+            if c > mid:
+                return False, "invalidated"
+            if hi >= range_low * (1.0 - RETEST_TOL_PCT) and c < range_low:
+                retested = True
+
+    last_close = float(after_bars.iloc[-1]["close"])
+    holds_outside = (
+        last_close > range_high if direction == "long" else last_close < range_low
+    )
+
+    trade_ready = bool(clean_break and vol_ok and holds_outside)
+    if trade_ready:
+        return True, "confirmed"
+    if retested:
+        return False, "retested"
+    return False, "new"
+
+
+def orb_hit(bars: pd.DataFrame) -> dict[str, Any] | None:
+    """Find the status of ORB for the given bars.
+
+    Returns a dict with ``state`` (``"scanned"`` or ``"breakout"``),
+    ``direction``, ``trade_ready``, ``signal_state``, ``timestamp_ist``,
+    etc., or ``None`` if no opening range exists yet.
     """
     rng = orb_range(bars)
     if rng is None:
@@ -212,38 +315,67 @@ def orb_hit(bars: pd.DataFrame) -> dict[str, Any] | None:
     today = bars.index[-1].date()
     day_bars = bars[bars.index.date == today]
     after = day_bars.between_time(ORB_RANGE_END, "15:30")
-    # Drop the 09:30 bar itself: the range ends at 09:30, the first
-    # candidate bar is the one closing at 09:35 (timestamp 09:30).
-    # between_time is inclusive, so keep bars stamped 09:30 onwards —
-    # the 09:30-stamped bar IS the first completed bar after the range
-    # (it covers 09:30-09:35). The 09:25 bar is already excluded.
+
+    # The 09:30-stamped bar is the first completed bar after the range.
     for ts, bar in after.iterrows():
         close = float(bar["close"])
         if close > range_high:
+            trade_ready, sig_state = _evaluate_breakout_readiness(
+                day_bars, ts, "long", range_high, range_low
+            )
             return {
+                "state": "breakout",
                 "direction": "long",
                 "close": close,
                 "bar_time": ts.strftime("%H:%M"),
                 "range_high": range_high,
                 "range_low": range_low,
+                "trade_ready": trade_ready,
+                "signal_state": sig_state,
+                "timestamp_ist": ts.strftime("%Y-%m-%d %H:%M:%S IST"),
             }
         if close < range_low:
+            trade_ready, sig_state = _evaluate_breakout_readiness(
+                day_bars, ts, "short", range_high, range_low
+            )
             return {
+                "state": "breakout",
                 "direction": "short",
                 "close": close,
                 "bar_time": ts.strftime("%H:%M"),
                 "range_high": range_high,
                 "range_low": range_low,
+                "trade_ready": trade_ready,
+                "signal_state": sig_state,
+                "timestamp_ist": ts.strftime("%Y-%m-%d %H:%M:%S IST"),
             }
-    return None
+
+    # Range established but no breakout yet.
+    return {
+        "state": "scanned",
+        "direction": None,
+        "range_high": range_high,
+        "range_low": range_low,
+        "trade_ready": False,
+        "signal_state": None,
+        "timestamp_ist": datetime.now(_IST_TZ).strftime("%Y-%m-%d %H:%M:%S IST"),
+    }
 
 
 def scan_orb(universe: dict[str, str] | None = None) -> dict[str, Any]:
     """Run the ORB scan over ``universe`` (default: full NSE universe)."""
     universe = universe or UNIVERSE
     hits: list[dict[str, Any]] = []
+    scanned: list[dict[str, Any]] = []
     failed: list[dict[str, str]] = []
     usable = 0
+    now_ist = datetime.now(_IST_TZ)
+
+    # Global state for the scan.
+    scan_state = "scanned"
+    if now_ist.hour < 9 or (now_ist.hour == 9 and now_ist.minute < 30):
+        scan_state = "warming up"
+
     for name, symbol in universe.items():
         try:
             bars = fetch_intraday_bars(symbol, interval="5m")
@@ -251,36 +383,59 @@ def scan_orb(universe: dict[str, str] | None = None) -> dict[str, Any]:
             failed.append({"symbol": name, "reason": str(exc)})
             continue
         if not bars.empty:
-            cutoff = datetime.now(_IST_TZ) - timedelta(minutes=5)
-            local_index = bars.index if bars.index.tz is not None else bars.index.tz_localize(IST)
+            cutoff = now_ist - timedelta(minutes=5)
+            local_index = (
+                bars.index
+                if bars.index.tz is not None
+                else bars.index.tz_localize(_IST_TZ)
+            )
             bars = bars[local_index <= cutoff]
         if bars.empty:
             failed.append({"symbol": name, "reason": "no intraday bars returned"})
             continue
         usable += 1
-        hit = orb_hit(bars)
-        if hit is None:
+        res = orb_hit(bars)
+        if res is None:
             continue
+
         last = bars.iloc[-1]
-        hits.append(
-            {
-                "symbol": name,
-                "yahoo_symbol": symbol,
-                **hit,
-                "volume": float(last["volume"]),
-                "price_x_volume": hit["close"] * float(last["volume"]),
-                "date": str(bars.index[-1].date()),
-            }
-        )
+        vol = float(last["volume"]) if pd.notna(last["volume"]) else 0.0
+        ref_price = res.get("close") or (res["range_high"] + res["range_low"]) / 2.0
+        row_state = "breakout" if res["state"] == "breakout" else "scanned"
+        entry = {
+            "symbol": name,
+            "yahoo_symbol": symbol,
+            **res,
+            "state": row_state,
+            "trade_ready": bool(res.get("trade_ready", False)),
+            "signal_state": res.get("signal_state"),
+            "volume": vol,
+            "price_x_volume": float(ref_price) * vol,
+            "date": str(bars.index[-1].date()),
+        }
+
+        if row_state == "breakout":
+            hits.append(entry)
+        else:
+            scanned.append(entry)
+
     hits.sort(key=lambda h: h["price_x_volume"], reverse=True)
+    scanned.sort(key=lambda s: s["price_x_volume"], reverse=True)
+
+    if scan_state == "warming up" and (hits or scanned):
+        scan_state = "scanned"
+
     return {
         "scan": "orb",
-        "run_at_ist": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
+        "state": scan_state,
+        "run_at_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "fetched": len(universe),
         "usable": usable,
         "failed": failed,
         "hits": hits,
+        "scanned": scanned,
         "hit_count": len(hits),
+        "scanned_count": len(scanned),
     }
 
 
@@ -301,8 +456,10 @@ def print_summary(result: dict[str, Any]) -> None:
     """Print counts and top hits for a scan result."""
     scan = result["scan"]
     print(f"{scan} scan — {result['run_at_ist']}")
-    print(f"fetched={result['fetched']} usable={result['usable']} "
-          f"hits={result['hit_count']} failed={len(result['failed'])}")
+    print(
+        f"fetched={result['fetched']} usable={result['usable']} "
+        f"hits={result['hit_count']} failed={len(result['failed'])}"
+    )
     if result["failed"]:
         print("failed symbols (NOT scanned — coverage is partial):")
         for item in result["failed"][:10]:
@@ -318,9 +475,13 @@ def print_summary(result: dict[str, Any]) -> None:
         if scan == "daily":
             extra = f" setups={','.join(hit['setups'])}"
         else:
-            extra = (f" {hit['direction']} @ {hit['close']:.2f} "
-                     f"bar {hit['bar_time']} "
-                     f"range {hit['range_low']:.2f}-{hit['range_high']:.2f}")
+            ready_tag = " [TRADE READY]" if hit.get("trade_ready") else ""
+            extra = (
+                f" {hit['direction']} @ {hit['close']:.2f} "
+                f"bar {hit['bar_time']} "
+                f"range {hit['range_low']:.2f}-{hit['range_high']:.2f}"
+                f"{ready_tag}"
+            )
         print(f"  {hit['symbol']}: close {hit['close']:.2f}{extra}")
 
 
