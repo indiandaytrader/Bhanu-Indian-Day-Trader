@@ -208,6 +208,8 @@ def _page(lang: str, title: str, body: str, head_extra: str = "", scripts: str =
             "<span class='dot'></span> LIVE · last update --:--:--</p>"
         )
         scripts = scripts + _live_js()
+    # When market is closed, the header badge and live indicator will show frozen state
+    # The 1-second IST clock in paintClock() and the 2-second tick polling are preserved
 
     def _tab(key: str, href: str, label: str) -> str:
         on = " class='on'" if active == key else ""
@@ -242,7 +244,8 @@ html[data-theme="dark"]{{--bg:#121417;--card:#1c1f24;--text:#e8e8e8;--muted:#9aa
 --upmid:#2f9e5f;--downmid:#d6455d;--blue:#7aa2ff;--gold:#b7791f;--th:#24272c;--grid:#2a2d33}}
 body{{font:13px/1.4 Inter,system-ui,sans-serif;max-width:1400px;margin:0 auto;padding:0 22px 22px;
 background:var(--bg);color:var(--text)}}
-.mono{{font-family:"JetBrains Mono",monospace}}
+.mono{{font-family:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}}
+.price-mono{{font-family:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}}
 h1{{font:700 26px "Barlow Condensed",sans-serif;letter-spacing:.5px;margin:14px 0 4px}}
 h2{{font:700 19px "Barlow Condensed",sans-serif;letter-spacing:.6px;text-transform:uppercase;margin:12px 0 4px}}
 h3{{font:700 17px "Barlow Condensed",sans-serif;letter-spacing:.4px;text-transform:uppercase}}
@@ -296,7 +299,7 @@ padding:4px 10px;color:var(--text);text-decoration:none}}
 .icard .lab b{{font:700 14px "Barlow Condensed",sans-serif;letter-spacing:.4px;display:block;line-height:1}}
 .icard .foot{{position:absolute;left:0;right:0;bottom:0;height:30px;border-top:1px solid #edf0f3;
 padding:3px 8px;font-size:11px;display:flex;justify-content:space-between;align-items:center;background:var(--card)}}
-.icard .foot b{{font-weight:600;font-family:"JetBrains Mono",monospace}}
+.icard .foot b{{font-weight:600;font-family:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}}
 .loading{{color:var(--muted);font-style:italic}}
 .tag{{display:inline-block;font-size:9.5px;font-weight:700;border:1px solid currentColor;border-radius:3px;padding:0 5px;line-height:14px}}
 .tag.bull{{color:var(--up)}}.tag.bear{{color:var(--down)}}
@@ -311,12 +314,12 @@ a.icard{{display:block}}
 .stock-grid{{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:12px;align-items:start}}
 @media (max-width:900px){{.stock-grid{{grid-template-columns:1fr}}}}
 .stock-head{{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}}
-.stock-head .px{{font:700 22px "JetBrains Mono",monospace}}
+.stock-head .px{{font:700 22px 'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}}
 .setup-stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin:6px 0}}
 .setup-stats div{{background:#f1f4f8;border-radius:6px;padding:4px 6px;font-size:10px;color:var(--muted)}}
-.setup-stats b{{display:block;font-size:13.5px;color:var(--text);font-family:"JetBrains Mono",monospace}}
+.setup-stats b{{display:block;font-size:13.5px;color:var(--text);font-family:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}}
 .counts{{font-size:9.5px;font-weight:700}}
-.counts .n{{font:700 20px "JetBrains Mono",monospace;line-height:1}}
+.counts .n{{font:700 20px 'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;line-height:1}}
 .sm-stage{{display:flex;gap:10px;align-items:stretch}}
 .sm-spaghetti{{flex:1;min-width:0;position:relative}}
 .sm-waterfall{{width:300px;flex:none;display:flex;flex-direction:column;gap:3px}}
@@ -342,12 +345,12 @@ a.icard{{display:block}}
 .tpanel .tn .muted{{font-weight:500;font-size:11px}}
 .tpanel .ts{{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin:6px 0}}
 .tpanel .ts div{{background:#f1f4f8;border-radius:6px;padding:4px 6px;font-size:10px;color:var(--muted)}}
-.tpanel .ts b{{display:block;font-size:13.5px;color:var(--text);font-family:"JetBrains Mono",monospace}}
-.tpanel .tr{{display:flex;justify-content:space-between;gap:6px;font-size:10.5px;padding:3px 4px;border-radius:5px;font-family:"JetBrains Mono",monospace}}
+.tpanel .ts b{{display:block;font-size:13.5px;color:var(--text);font-family:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}}
+.tpanel .tr{{display:flex;justify-content:space-between;gap:6px;font-size:10.5px;padding:3px 4px;border-radius:5px;font-family:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}}
 .tpanel .tr:hover{{background:#e9f0fb}}
 .tpanel .rr{{display:flex;height:7px;border-radius:4px;overflow:hidden;margin-top:5px}}
 .tpanel .rr i{{display:block;height:100%}}
-.tpanel .rrl{{display:flex;justify-content:space-between;font-size:10px;margin-top:2px;font-family:"JetBrains Mono",monospace}}
+.tpanel .rrl{{display:flex;justify-content:space-between;font-size:10px;margin-top:2px;font-family:'JetBrains Mono',ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}}
 .tpanel .st{{border-radius:7px;padding:6px 8px;margin:6px 0;font-size:11px;line-height:1.45}}
 .tpanel .st b{{font-size:10.5px;letter-spacing:.3px}}
 .tpanel .st.sig{{background:#e8f6ee;border:1px solid #a7dcbc}}
@@ -446,6 +449,29 @@ function bhanuLiveSet(state){
     el.innerHTML='<span class="dot"></span> LIVE · update failed, retrying… (last good '+last+')';
   }
 }
+// When market closes, update the header market-status-badge with last price/prev close/timestamp
+function bhanuUpdateMarketBadge(){
+  const badge = document.getElementById('market-status-badge');
+  if(!badge)return;
+  if(state.marketOpen){
+    badge.innerHTML = '<span class="dot"></span> LIVE · 2s';
+    badge.classList.remove('closed');
+  }else{
+    badge.classList.add('closed');
+    const lastQuote = window.lastQuote;
+    if(lastQuote && lastQuote.price !== null && lastQuote.price !== undefined){
+      const dt = new Date(lastQuote.timestamp * 1000);
+      const formatted = dt.toLocaleString('en-IN',{
+        day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false,timeZone:'Asia/Kolkata'
+      });
+      badge.innerHTML = '<span class="dot"></span> Market Closed · ' +
+        lastQuote.price.toFixed(2) + ' · prev close ' + (lastQuote.prev_close ? lastQuote.prev_close.toFixed(2) : '—') +
+        ' · last updated ' + formatted + ' IST';
+    }else{
+      badge.innerHTML = '<span class="dot"></span> Market Closed';
+    }
+  }
+}
 function bhanuLiveTick(){
   if(document.hidden||document.body.classList.contains('is-market-closed')){return;}
   if(window.bhanuLiveInFlight){return;}
@@ -465,7 +491,10 @@ function bhanuLiveTick(){
 }
 function bhanuMarkLive(){
   bhanuLiveSet('ok');
+  bhanuUpdateMarketBadge();
 }
+// Store last quote data globally for badge reference
+window.lastQuote = window.lastQuote || {};
 function bhanuStartLive(){
   var ind=document.getElementById('bhanu-live-indicator');
   if(!ind){return;}
@@ -476,6 +505,8 @@ function bhanuStartLive(){
   document.addEventListener('visibilitychange',function(){
     if(!document.hidden){bhanuLiveTick();}
   });
+  // Update market badge on live start
+  bhanuUpdateMarketBadge();
 }
 bhanuStartLive();
 </script>""".replace("__LIVE_MS__", str(LIVE_REFRESH_MS))
@@ -514,7 +545,9 @@ function bhanuSvgLine(el, points, color){
   var col=color||'#2563eb';
   var areaD='M'+X(0).toFixed(1)+' '+(H-pad)+' '+d.substring(1)+' L'+X(points.length-1).toFixed(1)+' '+(H-pad)+' Z';
   var last=points[points.length-1].value;
-  el.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Price chart (simple view)"><defs><linearGradient id="bhanuSvgGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="'+col+'" stop-opacity="0.28"/><stop offset="1" stop-color="'+col+'" stop-opacity="0"/></linearGradient></defs><path d="'+areaD+'" fill="url(#bhanuSvgGrad)" stroke="none"/><path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/><circle cx="'+X(points.length-1)+'" cy="'+Y(last)+'" r="4" fill="'+col+'"/><text x="'+(W-8)+'" y="18" text-anchor="end" font-size="13" font-weight="bold" fill="'+(bhanuDark()?'#fff':'#111')+'">'+last.toLocaleString('en-IN')+'</text></svg><p class="muted">Simple chart view — full chart library could not load.</p>';
+  var lx=X(points.length-1), ly=Y(last);
+  // thinner line (1.5), glowing last point with subtle ring
+  el.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Price chart (simple view)"><defs><linearGradient id="bhanuSvgGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="'+col+'" stop-opacity="0.2"/><stop offset="1" stop-color="'+col+'" stop-opacity="0"/></linearGradient><filter id="bhanuGlow"><feGaussianBlur stdDeviation="2"/><feMerge><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><path d="'+areaD+'" fill="url(#bhanuSvgGrad)" stroke="none"/><path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><circle cx="'+lx+'" cy="'+ly+'" r="5" fill="'+col+'" filter="url(#bhanuGlow)"/><circle cx="'+lx+'" cy="'+ly+'" r="9" fill="none" stroke="'+col+'" stroke-width="1.5" opacity="0.3"/><text x="'+(W-8)+'" y="18" text-anchor="end" font-size="13" font-weight="bold" fill="'+(bhanuDark()?'#fff':'#111')+'">'+last.toLocaleString('en-IN')+'</text></svg><p class="muted">Simple chart view — full chart library could not load.</p>';
   var _paths=el.querySelectorAll('path');
   el._bhanuArea=_paths[0];
   el._bhanuPath=_paths[1];
@@ -601,12 +634,24 @@ function bhanuSvgCandles(el, candles){
   if(mx===mn){mx=mn+1;}
   var n=candles.length, bw=(W-2*pad)/n;
   function Y(v){return H-pad-(v-mn)/(mx-mn)*(H-2*pad);}
+
+  // Calculate PDH/PDL from previous day (first candle's open/close range as proxy)
+  // For intraday, PDH/PDL would be from previous session - we'll use the first candle's high/low
+  var pdh=candles[0].high, pdl=candles[0].low;
+
   var s='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Candlestick chart (simple view)">';
+  // Dashed PDH/PDL lines
+  s+='<line x1="'+pad+'" y1="'+Y(pdh).toFixed(1)+'" x2="'+(W-pad)+'" y2="'+Y(pdh).toFixed(1)+'" stroke="#7e57c2" stroke-width="1" stroke-dasharray="6 4" opacity="0.7"/>';
+  s+='<text x="'+(pad+4)+'" y="'+(Y(pdh)-4).toFixed(1)+'" font-size="9" fill="#7e57c2" opacity="0.7">PDH</text>';
+  s+='<line x1="'+pad+'" y1="'+Y(pdl).toFixed(1)+'" x2="'+(W-pad)+'" y2="'+Y(pdl).toFixed(1)+'" stroke="#7e57c2" stroke-width="1" stroke-dasharray="6 4" opacity="0.7"/>';
+  s+='<text x="'+(pad+4)+'" y="'+(Y(pdl)+12).toFixed(1)+'" font-size="9" fill="#7e57c2" opacity="0.7">PDL</text>';
+
   candles.forEach(function(c,i){
     var x=pad+i*bw+bw*0.2, w=Math.max(1,bw*0.6);
     var col=c.close>=c.open?'#2f9e5f':'#d6455d';
+    // Higher order block opacity (0.85 for body)
     s+='<line x1="'+(x+w/2).toFixed(1)+'" y1="'+Y(c.high).toFixed(1)+'" x2="'+(x+w/2).toFixed(1)+'" y2="'+Y(c.low).toFixed(1)+'" stroke="'+col+'" stroke-width="1"/>';
-    s+='<rect x="'+x.toFixed(1)+'" y="'+Y(Math.max(c.open,c.close)).toFixed(1)+'" width="'+w.toFixed(1)+'" height="'+Math.max(1,Math.abs(Y(c.open)-Y(c.close))).toFixed(1)+'" fill="'+col+'"/>';
+    s+='<rect x="'+x.toFixed(1)+'" y="'+Y(Math.max(c.open,c.close)).toFixed(1)+'" width="'+w.toFixed(1)+'" height="'+Math.max(1,Math.abs(Y(c.open)-Y(c.close))).toFixed(1)+'" fill="'+col+'" fill-opacity="0.85"/>';
   });
   s+='</svg><p class="muted">Simple chart view — full chart library could not load.</p>';
   el.innerHTML=s;
@@ -910,7 +955,8 @@ function bhanuLineRender(id, p, symbol){
   }
   var o=bhanuChartOpts(260);o.width=el.clientWidth||900;
   var ch=LightweightCharts.createChart(el,o);
-  var s=ch.addAreaSeries({lineColor:col,topColor:bhanuAreaTop(col),bottomColor:'rgba(0,0,0,0)',lineWidth:3,crosshairMarkerRadius:5});
+  // thinner line (1.5), subtle glowing last point via crosshairMarker
+  var s=ch.addAreaSeries({lineColor:col,topColor:bhanuAreaTop(col),bottomColor:'rgba(0,0,0,0)',lineWidth:3,crosshairMarkerVisible:true,crosshairMarkerRadius:4,crosshairMarkerBorderColor:col,crosshairMarkerBackgroundColor:col});
   s.setData(p.line);ch.timeScale().fitContent();
   window.addEventListener('resize',function(){ch.applyOptions({width:el.clientWidth||900});});
   window.bhanuLines[id]={el:el,chart:ch,series:s,line:p.line.slice(),lastTime:lastTime,lastValue:lastVal,color:col};
@@ -1323,7 +1369,7 @@ function bhanuCandleRender(id, p, refreshUrl){
   cs.setData(p.candles);
   var vw=null;
   if(p.vwap&&p.vwap.length){
-    vw=ch.addLineSeries({color:'#7e57c2',lineWidth:1,priceLineVisible:false,lastValueVisible:false});
+    vw=ch.addLineSeries({color:'#7e57c2',lineWidth:1.5,priceLineVisible:false,lastValueVisible:false});
     vw.setData(p.vwap);
   }
   var st={chart:ch,series:cs,vwap:vw,priceLines:[],boxes:[],wrap:wrap,el:el,payload:p,
@@ -1394,7 +1440,45 @@ function bhanuQuoteFetch(){
       var ce=document.getElementById('q-'+slug+'-chg');
       var ve=document.getElementById('q-'+slug+'-prev');
       const state=document.getElementById('q-'+slug+'-status');
-      if(state)state.textContent=q.error||(document.body.classList.contains('is-market-closed')?'Market Closed · Last close':'Last reported · source time unverified');
+      const source=document.getElementById('q-'+slug+'-source');
+      var isClosed=document.body.classList.contains('is-market-closed');
+      var statusText='', sourceText='';
+
+      if(q.error){
+        statusText='Unavailable';
+        if(source)sourceText='source error';
+      }else if(q.price===null||q.price===undefined){
+        statusText='Unavailable';
+        if(source)sourceText='no price data';
+      }else if(isClosed){
+        statusText='Market Closed';
+        if(q.timestamp){
+          var dt=new Date(q.timestamp*1000);
+          sourceText='last updated '+dt.toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})+' IST';
+        }else{
+          sourceText='last close';
+        }
+      }else if(q.stale){
+        statusText='Stale';
+        if(q.timestamp){
+          var dt=new Date(q.timestamp*1000);
+          sourceText='source '+dt.toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})+' IST';
+        }else{
+          sourceText='source time unknown';
+        }
+      }else{
+        statusText='Live';
+        if(q.timestamp){
+          var dt=new Date(q.timestamp*1000);
+          sourceText='source '+dt.toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})+' IST';
+        }else{
+          sourceText='source time unknown';
+        }
+      }
+
+      if(state)state.textContent=statusText;
+      if(source)source.textContent=sourceText;
+
       if(q.price===null||q.price===undefined){
         if(pe)pe.textContent='data unavailable';
         if(ce)ce.textContent='—';
@@ -1408,9 +1492,33 @@ function bhanuQuoteFetch(){
         ce.textContent=(q.change_pct>=0?'+':'')+Number(q.change_pct).toFixed(2)+'%';
         ce.className='index-change '+(q.change_pct>=0?'up':'down');
       }
-      if(ve&&q.prev_close!==null&&q.prev_close!==undefined){ve.textContent='prev close '+Number(q.prev_close).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}
+      // When market is closed, show last price, prev close, and last updated time on the quote card
+      if(ve){
+        var prevBase = (q.prev_close !== null && q.prev_close !== undefined)
+          ? 'prev close ' + Number(q.prev_close).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2})
+          : 'prev close —';
+        if(isClosed){
+          if(q.timestamp){
+            var dt = new Date(q.timestamp*1000);
+            var fmt = dt.toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+            ve.textContent = prevBase + ' · last updated ' + fmt + ' IST';
+          }else{
+            ve.textContent = prevBase + ' · last close';
+          }
+        }else{
+          ve.textContent = prevBase;
+        }
+      }
       var card=document.getElementById('q-'+slug+'-card');
       if(card&&q.change_pct!==null&&q.change_pct!==undefined){card.classList.toggle('neg',q.change_pct<0);}
+      // Store last quote for badge update
+      if (typeof state !== 'undefined') {
+        state.lastQuote = q;
+        if (typeof updateMarketBadge === 'function') updateMarketBadge();
+      } else if (typeof window.lastQuote !== 'undefined') {
+        window.lastQuote = q;
+        if (typeof bhanuUpdateMarketBadge === 'function') bhanuUpdateMarketBadge();
+      }
     });
     if(typeof bhanuMarkLive==='function'){bhanuMarkLive();}
   }).catch(function(error){
@@ -1710,10 +1818,15 @@ def _candle_chart_block(chart_id: str, symbol: str, note: str | None = None,
             if tf_page == "orb"
             else "window.bhanuLevelsSymbol||'NIFTY'"
         )
+        tf_list = (
+            (("5m", "5m"), ("10m", "10m"), ("15m", "15m"), ("1H", "1H"), ("D", "Daily"))
+            if tf_page == "levels"
+            else (("5m", "5m"), ("15m", "15m"), ("1H", "1h"), ("D", "D"))
+        )
         btns = "".join(
             f"<button type='button' class='tfbtn{' on' if iv == '5m' else ''}' "
             f"onclick=\"BhanuPro.switchTimeframe('{tf_page}',{sym_expr},'{iv}',this)\">{label}</button>"
-            for iv, label in (("5m", "5m"), ("15m", "15m"), ("1H", "1h"), ("D", "D"))
+            for iv, label in tf_list
         )
         tf_html = (
             f"<div class='tf-toolbar'><div class='tf-group'>{btns}</div>"
@@ -1746,11 +1859,13 @@ def _candle_chart_block(chart_id: str, symbol: str, note: str | None = None,
     )
 
 
-def _mc_histogram_svg(hist: dict) -> str:
+def _mc_histogram_svg(hist: dict, canvas_id: str = "mc-hist-canvas") -> str:
     """Monte Carlo distribution bars (works offline)."""
     buckets = hist.get("buckets", [])
     n = hist.get("n", 0)
     avg_r = hist.get("avg_r")
+    mean = hist.get("mean")
+    std_dev = hist.get("std_dev")
     if not buckets or n == 0:
         return "<p class='muted'>Distribution unavailable — no replay outcomes.</p>"
     max_count = max(b["count"] for b in buckets) or 1
@@ -1773,11 +1888,28 @@ def _mc_histogram_svg(hist: dict) -> str:
             f"<b>{avg_r:+.2f}R</b> (the bar the average sits in is the "
             f"typical replay).</p>"
         )
+    stats_line = ""
+    if mean is not None and std_dev is not None:
+        stats_line = (
+            f"<p class='muted'>Mean: <b>{mean:+.2f}R</b> · "
+            f"1σ: <b>[{mean - std_dev:+.2f}R, {mean + std_dev:+.2f}R]</b> · "
+            f"2σ: <b>[{mean - 2*std_dev:+.2f}R, {mean + 2*std_dev:+.2f}R]</b></p>"
+        )
+    # Include data attributes for canvas chart rendering
+    values_json = json.dumps(hist.get("values", []))
     return (
         f"<h3>Monte Carlo distribution — {n:,} replays</h3>"
         f"<p class='muted'>Each replay ran today's setup on resampled 5m bars "
         f"from the last 60 days. This is how the 10,000 checks split up:</p>"
-        f"<div class='table-wrap'><table>{rows}</table></div>{avg_line}"
+        f"<div class='table-wrap'><table>{rows}</table></div>"
+        f"{avg_line}{stats_line}"
+        f"<canvas id='{canvas_id}' width='600' height='200' "
+        f"data-values='{_esc(values_json)}' "
+        f"data-mean='{mean if mean is not None else 0}' "
+        f"data-std='{std_dev if std_dev is not None else 0}' "
+        f"data-buckets='{_esc(json.dumps(buckets))}' "
+        f"style='width:100%;max-width:600px;height:auto;margin-top:12px;'></canvas>"
+        f"<script>if(typeof renderMcHistCanvas==='function') renderMcHistCanvas('{canvas_id}');</script>"
     )
 
 
@@ -1794,9 +1926,10 @@ def _index_cards_html(lang: str = "hi") -> str:
             f"<div class='spark' id='q-{slug}-spark'></div>"
             f"<div class='lab'><b>{_esc(label)}</b></div>"
             f"<small class='quote-status' id='q-{slug}-status'>Waiting for source data</small>"
-            f"<div class='foot'><b id='q-{slug}-price'>loading…</b>"
-            f"<span id='q-{slug}-chg'>—</span>"
-            f"<span class='muted' id='q-{slug}-prev'>prev close —</span></div></a>"
+            f"<small class='quote-source' id='q-{slug}-source'></small>"
+            f"<div class='foot'><b class='price-mono' id='q-{slug}-price'>loading…</b>"
+            f"<span class='price-mono' id='q-{slug}-chg'>—</span>"
+            f"<span class='muted price-mono' id='q-{slug}-prev'>prev close —</span></div></a>"
         )
     return f"<div class='index-cards'>{cards}</div>"
 
@@ -1860,6 +1993,22 @@ def _orb_table_html(result: dict, lang: str, limit: int = 50) -> str:
     hits = result.get("hits", [])[:limit]
     failed = result.get("failed", [])
 
+    def _state_pill(h: dict) -> str:
+        if h.get("trade_ready"):
+            cls, lbl = "state-ready", "TRADE READY"
+        elif str(h.get("state", "")).lower() == "breakout":
+            cls, lbl = "state-breakout", "BREAKOUT"
+        else:
+            cls, lbl = "state-scanned", "SCANNED"
+        sig_lbl = ""
+        if h.get("signal_state"):
+            s_key = str(h["signal_state"]).lower()
+            s_txt = signal_mod.signal_state_label(s_key)
+            sig_lbl = f" <span class='state-pill state-{_esc(s_key)}'>{_esc(s_txt)}</span>"
+        ts = h.get("timestamp_ist") or ""
+        ts_html = f"<br><small class='muted'>{_esc(ts[11:19] if len(ts) >= 19 else ts)}</small>" if ts else ""
+        return f"<span class='state-pill {cls}'>{lbl}</span>{sig_lbl}{ts_html}"
+
     def _hit_row(h: dict) -> str:
         try:
             stop_mid = (float(h["range_high"]) + float(h["range_low"])) / 2.0
@@ -1868,10 +2017,14 @@ def _orb_table_html(result: dict, lang: str, limit: int = 50) -> str:
         except (KeyError, TypeError, ValueError):
             tps = "—"
         return (
-            f"<tr><td><a href='/stock?symbol={_esc(h.get('symbol', ''))}&lang={lang}'>"
+            f"<tr data-orb-sym='{_esc(h.get('symbol', ''))}' data-orb-rh='{_esc(h.get('range_high', ''))}' "
+            f"data-orb-rl='{_esc(h.get('range_low', ''))}' data-orb-dir='{_esc(h.get('direction', ''))}' "
+            f"data-orb-state='{_esc(h.get('state', 'breakout'))}' data-sig-state='{_esc(h.get('signal_state') or '')}'>"
+            f"<td><a href='/stock?symbol={_esc(h.get('symbol', ''))}&lang={lang}'>"
             f"<b>{_esc(h.get('symbol', ''))}</b></a></td><td>{_opt(h.get('direction', ''))}</td>"
             f"<td>{_esc(h.get('close', ''))}</td><td>{_esc(h.get('bar_time', ''))}</td>"
             f"<td>{_esc(h.get('range_high', ''))} – {_esc(h.get('range_low', ''))}</td>"
+            f"<td class='orb-state-cell'>{_state_pill(h)}</td>"
             f"<td>{tps}</td></tr>"
         )
 
@@ -1902,10 +2055,10 @@ def _orb_table_html(result: dict, lang: str, limit: int = 50) -> str:
         f"A hit is the first completed 5m bar that CLOSES above/below the 09:15–09:30 range — "
         f"wicks do not count, and a hit is stale once the price has moved on.</p>"
         f"<div class='table-wrap'><table style='min-width:600px'>"
-        f"<colgroup><col style='width:14%'><col style='width:12%'><col style='width:16%'>"
-        f"<col style='width:14%'><col style='width:20%'><col style='width:24%'></colgroup>"
+        f"<colgroup><col style='width:12%'><col style='width:10%'><col style='width:12%'>"
+        f"<col style='width:10%'><col style='width:18%'><col style='width:16%'><col style='width:22%'></colgroup>"
         f"<tr><th>Symbol</th><th>Direction</th><th>Close</th><th>Bar</th>"
-        f"<th>Range high – low</th><th>TP1 / TP2 / TP3</th></tr>{rows}</table></div>{failed_html}{more_html}</div>"
+        f"<th>Range high – low</th><th>State</th><th>TP1 / TP2 / TP3</th></tr>{rows}</table></div>{failed_html}{more_html}</div>"
     )
 
 
@@ -2215,10 +2368,13 @@ def _signal_breakdown_html(sig: dict) -> str:
             )
     except Exception:  # noqa: BLE001
         robot_line = ""
+    sig_state_key = str(sig.get("signal_state") or "new").lower()
+    sig_state_txt = signal_mod.signal_state_label(sig_state_key)
+    sig_state_pill = f"<span class='state-pill state-{_esc(sig_state_key)}'>{_esc(sig_state_txt)}</span>"
     return (
         f"<div class='tpanel'>"
         f"<div class='tt'><span>SIGNAL — {_esc(sig.get('symbol', ''))} "
-        f"{_opt(sig.get('direction', ''))}</span><span>{decision}</span></div>"
+        f"{_opt(sig.get('direction', ''))} {sig_state_pill}</span><span>{decision}</span></div>"
         f"<div class='tn'>{decision}{size_note} "
         f"<span class='muted'>{_esc(sig.get('summary', ''))}</span></div>"
         f"<div class='ts'><div>ENTRY<b>{_f(sig.get('entry'))}</b></div>"
@@ -2302,16 +2458,79 @@ def _levels_table_html(result: dict, lang: str) -> str:
                 return "—", "—", "—"
         return _fmt(tp1), _fmt(tp2), _fmt(tp3)
 
+    def _str_badge(strength, touches, dist_pct) -> str:
+        if strength is None:
+            return ""
+        cls = "strong" if int(strength) >= 70 else ("medium" if int(strength) >= 45 else "")
+        t_txt = f" · {int(touches)}t" if touches is not None else ""
+        d_txt = f" · {float(dist_pct):+.2f}%" if dist_pct is not None else ""
+        return f"<br><span class='str-pill {cls}'>S{int(strength)}{t_txt}{d_txt}</span>"
+
     def _body_row(r: dict) -> str:
         tp1, tp2, tp3 = _tps(r)
+        sym = _esc(r.get("symbol", ""))
+        sup_meta = _str_badge(r.get("support_strength"), r.get("support_touches"), r.get("support_distance_pct"))
+        res_meta = _str_badge(r.get("resistance_strength"), r.get("resistance_touches"), r.get("resistance_distance_pct"))
         return (
-            f"<tr><td>{_esc(r.get('symbol', ''))}</td><td>{_fmt(r.get('price'))}</td>"
-            f"<td>{_fmt(r.get('nearest_support'))}</td><td>{_fmt(r.get('nearest_resistance'))}</td>"
+            f"<tr><td><a href='/stock?symbol={sym}&lang={lang}'><b>{sym}</b></a></td>"
+            f"<td>{_fmt(r.get('price'))}</td>"
+            f"<td>{_fmt(r.get('nearest_support'))}{sup_meta}</td>"
+            f"<td>{_fmt(r.get('nearest_resistance'))}{res_meta}</td>"
             f"<td>{_fmt(r.get('pdh'))}</td><td>{_fmt(r.get('pdl'))}</td>"
             f"<td>{_fmt(r.get('entry'))}</td><td>{_sl(r)}</td>"
             f"<td>{tp1}</td><td>{tp2}</td><td>{tp3}</td>"
             f"<td>{_opt(r.get('signal')) if r.get('signal') else 'None'}</td></tr>"
         )
+
+    # Top summary strip (Trend / Support / Resistance / Distance / Setup / R:R) + Stock link + Export
+    summary_html = ""
+    zones_html = ""
+    if rows:
+        top = rows[0]
+        sm = top.get("summary") or {}
+        dist = sm.get("distance") or {}
+        dist_txt = (
+            f"S {dist.get('support_pts')} ({dist.get('support_pct')}%) / "
+            f"R {dist.get('resistance_pts')} ({dist.get('resistance_pct')}%)"
+            if dist.get("support_pts") is not None or dist.get("resistance_pts") is not None
+            else "—"
+        )
+        top_sym = _esc(top.get("symbol", "NIFTY"))
+        summary_html = (
+            "<div class='ml-h' style='margin-bottom:6px'>"
+            f"<span class='pill'>Summary: {top_sym}</span><span class='sp'></span>"
+            f"<a class='btn-ghost' href='/stock?symbol={top_sym}&lang={lang}'>Open {top_sym} Stock Page →</a>"
+            "<button type='button' class='btn-ghost' onclick=\"(function(){var t=document.querySelector('#levels-table table');if(!t)return;var csv=Array.from(t.rows).map(r=>Array.from(r.cells).map(c=>'\\x22'+c.innerText.replace(/\\n/g,' ').replace(/\\x22/g,'\\x22\\x22')+'\\x22').join(',')).join('\\n');var a=document.createElement('a');a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(csv);a.download='bhanu_levels.csv';a.click();})()\">⬇ Export CSV</button>"
+            "</div>"
+            "<div class='levels-summary-grid'>"
+            f"<div class='levels-summary-cell'><small>Trend</small><strong>{_esc(sm.get('trend', '—'))}</strong></div>"
+            f"<div class='levels-summary-cell'><small>Support</small><strong class='up'>{_fmt(sm.get('support'))}</strong></div>"
+            f"<div class='levels-summary-cell'><small>Resistance</small><strong class='down'>{_fmt(sm.get('resistance'))}</strong></div>"
+            f"<div class='levels-summary-cell'><small>Distance</small><strong class='mono' style='font-size:11px'>{_esc(dist_txt)}</strong></div>"
+            f"<div class='levels-summary-cell'><small>Setup</small><strong>{_esc(sm.get('setup', 'Watching'))}</strong></div>"
+            f"<div class='levels-summary-cell'><small>R:R</small><strong class='mono'>{_esc(sm.get('risk_reward', '—'))}</strong></div>"
+            "</div>"
+        )
+        details = top.get("level_details") or []
+        if details:
+            kind_colors = {"PDH": "#f59e0b", "PDL": "#8d6e63", "ORB": "#2563eb", "swing": "#7c3aed"}
+            z_rows = "".join(
+                f"<tr style='border-left:4px solid {kind_colors.get(d.get('kind'), '#64748b')}'>"
+                f"<td><b>{_esc(d.get('kind', ''))}</b></td>"
+                f"<td class='{'up' if d.get('side') == 'support' else 'down'}'>{_esc(d.get('side', '').upper())}</td>"
+                f"<td class='mono'>{_fmt(d.get('price'))}</td>"
+                f"<td class='mono'>{_fmt(d.get('zone_low'))} – {_fmt(d.get('zone_high'))}</td>"
+                f"<td class='mono'><b>{int(d.get('strength', 0))}</b>/100</td>"
+                f"<td class='mono'>{int(d.get('touches', 0))}</td>"
+                f"<td class='mono'>{float(d.get('distance_pts', 0)):+.2f} ({float(d.get('distance_pct', 0)):+.2f}%)</td></tr>"
+                for d in details[:10]
+            )
+            zones_html = (
+                f"<h3 style='margin-top:12px'>{top_sym} — Key Zones (Strength · Touches · Distance)</h3>"
+                "<div class='table-wrap'><table><tr><th>Kind</th><th>Side</th><th>Level</th>"
+                "<th>Shaded Zone</th><th>Strength</th><th>Touches</th><th>Dist</th></tr>"
+                f"{z_rows}</table></div>"
+            )
 
     body_rows = "".join(_body_row(r) for r in rows)
     failed_html = ""
@@ -2335,7 +2554,7 @@ def _levels_table_html(result: dict, lang: str) -> str:
         "TP1/TP2/TP3 = 1R/2R/3R; flat by 15:15 IST.</p>"
     )
     return (
-        f"<div class='card'>{switch_html}"
+        f"<div class='card'>{summary_html}{switch_html}"
         f"<p>As of {_esc(result.get('run_at_ist', ''))}. One row per index — "
         f"enter here, exit here, support here, resistance here.</p>"
         f"<div class='table-wrap'><table style='min-width:720px'>"
@@ -2346,7 +2565,7 @@ def _levels_table_html(result: dict, lang: str) -> str:
         f"<tr><th>Symbol</th><th>Price</th><th>Nearest Support</th>"
         f"<th>Nearest Resistance</th><th>PDH</th><th>PDL</th><th>ORB Entry</th>"
         f"<th>SL</th><th>TP1</th><th>TP2</th><th>TP3</th><th>Signal</th></tr>{body_rows}</table></div>"
-        f"{failed_html}{note}</div>"
+        f"{zones_html}{failed_html}{note}</div>"
     )
 
 
@@ -2713,10 +2932,87 @@ def _timemachine_body(data: dict) -> str:
         if mc.get("histogram"):
             hist_html = (
                 f"<div class='card'><div id='mc-hist'>"
-                f"{_mc_histogram_svg(mc['histogram'])}</div></div>"
+                f"{_mc_histogram_svg(mc['histogram'], 'mc-hist-canvas-main')}</div></div>"
             )
+
+        # Yellow warning banner separating backtest from real-time data
+        warning_banner = (
+            "<div class='warning-banner' style='background:#fff3cd;border:1px solid #ffc107;"
+            "border-radius:6px;padding:12px;margin-bottom:16px;color:#856404;'>"
+            "<strong>⚠️ Backtest Only — Not Real-Time Data</strong><br>"
+            "This is a historical simulation using resampled bars from the last 60 days. "
+            "It does not predict future outcomes. Live trading involves fees, slippage, "
+            "gap risk, and psychological factors not captured here."
+            "</div>"
+        )
+
+        # Monte Carlo limitations
+        limitations_html = ""
+        if mc.get("mc_limitations"):
+            limitations_html = (
+                "<details class='mc-limitations' style='margin:12px 0;'><summary style='cursor:pointer;font-weight:600;"
+                "color:#dc3545;'>⚠️ Monte Carlo Limitations (click to expand)</summary>"
+                "<ul style='margin:8px 0 0 20px;font-size:0.9rem;line-height:1.6;color:#666;'>"
+                + "".join(f"<li>{_esc(lim)}</li>" for lim in mc["mc_limitations"])
+                + "</ul></details>"
+            )
+
+        # Histogram - net outcomes (after costs)
+        hist_net_html = ""
+        if mc.get("histogram_net"):
+            hist_net_html = (
+                "<details style='margin:12px 0;'><summary style='cursor:pointer;font-weight:600;color:#0066cc;'>"
+                "📊 Distribution After Costs (Net R) — click to expand</summary>"
+                f"<div id='tm-check-hist-net'>{_mc_histogram_svg(mc['histogram_net'], 'mc-hist-canvas-net')}</div>"
+                "</details>"
+            )
+
+        # Charges/Slippage scenarios table
+        charges_html = ""
+        if mc.get("brokerage_scenarios") and mc.get("slippage_scenarios"):
+            entry = mc.get("entry", 0)
+            stop = mc.get("stop", 0)
+            target = mc.get("target", 0)
+            risk = abs(entry - stop)
+            reward = abs(target - entry)
+            rr = reward / risk if risk else 0
+
+            charges_html = (
+                "<details style='margin:12px 0;'><summary style='cursor:pointer;font-weight:600;color:#0066cc;'>"
+                "💰 Charges & Slippage Scenarios — click to expand</summary>"
+                "<table style='width:100%;border-collapse:collapse;margin-top:8px;font-size:0.9rem;'>"
+                "<thead><tr style='background:#f5f5f5;'>"
+                "<th style='border:1px solid #ddd;padding:8px;text-align:left;'>Brokerage ₹/order</th>"
+                "<th style='border:1px solid #ddd;padding:8px;text-align:left;'>Slippage bps/side</th>"
+                "<th style='border:1px solid #ddd;padding:8px;text-align:right;'>Cost per trade (₹)</th>"
+                "<th style='border:1px solid #ddd;padding:8px;text-align:right;'>Cost in R</th>"
+                "<th style='border:1px solid #ddd;padding:8px;text-align:right;'>Avg R (gross)</th>"
+                "<th style='border:1px solid #ddd;padding:8px;text-align:right;'>Avg R (net)</th>"
+                "</tr></thead><tbody>"
+            )
+            avg_r_gross = mc.get("avg_r", 0)
+            for br in mc["brokerage_scenarios"]:
+                for sl in mc["slippage_scenarios"]:
+                    slippage_factor = sl / 10000.0
+                    cost_per_trade = 2 * br + 2 * entry * slippage_factor
+                    cost_in_r = cost_per_trade / risk if risk else 0
+                    avg_r_net = avg_r_gross - cost_in_r
+                    charges_html += (
+                        f"<tr><td style='border:1px solid #ddd;padding:8px;'>{br}</td>"
+                        f"<td style='border:1px solid #ddd;padding:8px;'>{sl}</td>"
+                        f"<td style='border:1px solid #ddd;padding:8px;text-align:right;'>{cost_per_trade:,.2f}</td>"
+                        f"<td style='border:1px solid #ddd;padding:8px;text-align:right;'>{cost_in_r:.3f}</td>"
+                        f"<td style='border:1px solid #ddd;padding:8px;text-align:right;'>{avg_r_gross:+.3f}</td>"
+                        f"<td style='border:1px solid #ddd;padding:8px;text-align:right;'>{avg_r_net:+.3f}</td></tr>"
+                    )
+            charges_html += "</tbody></table></details>"
+
         mc_html = (
-            hist_html
+            warning_banner
+            + limitations_html
+            + hist_html
+            + hist_net_html
+            + charges_html
             + f"<div class='card' id='mc-card'><h3 id='mc-title'>Monte Carlo Time Machine — {mc['n']:,} replays</h3>"
             f"<p id='mc-setup'>{_esc(mc.get('symbol', ''))} {_opt(mc.get('direction', ''))} "
             f"entry {_fmt(mc.get('entry'))}, stop {_fmt(mc.get('stop'))}, "
@@ -2725,9 +3021,10 @@ def _timemachine_body(data: dict) -> str:
             f"<tr><td>Target first (win)</td><td id='mc-target-pct'>{mc['target_first_pct']:.1f}%</td></tr>"
             f"<tr><td>Stop first (loss)</td><td id='mc-stop-pct'>{mc['stop_first_pct']:.1f}%</td></tr>"
             f"<tr><td>Neither (flat by 15:15)</td><td id='mc-neither-pct'>{mc['neither_pct']:.1f}%</td></tr></table></div>"
-            f"<p id='mc-summary'>Average outcome: {mc['avg_r']:+.2f}R. Best case (target hit): "
-            f"+{mc['best_case_r']:.1f}R. Worst case (stop hit): {mc['worst_case_r']:.1f}R. "
-            f"Verdict: {mc['verdict']} (break-even {mc['break_even_pct']:.1f}% "
+            f"<p id='mc-summary'>Average outcome (gross): <b>{mc['avg_r']:+.2f}R</b>. "
+            f"Average outcome (net of default costs): <b>{mc.get('avg_r_net', mc['avg_r']):+.2f}R</b>. "
+            f"Best case (target hit): +{mc['best_case_r']:.1f}R. Worst case (stop hit): {mc['worst_case_r']:.1f}R. "
+            f"Verdict: <b>{mc['verdict']}</b> (break-even {mc['break_even_pct']:.1f}% "
             f"target-first among decisive replays). "
             f"Reality check only — resampled bars cannot see the future, and "
             f"fees/slippage are ignored.</p></div>"
@@ -2817,22 +3114,98 @@ def _tm_check_result_html(result: dict) -> str:
     )
     if not mc.get("available"):
         return head + f"<p>Monte Carlo unavailable — {_esc(mc.get('reason', 'no data'))}</p></div>"
+
+    # Yellow warning banner separating backtest from real-time data
+    warning_banner = (
+        "<div class='warning-banner' style='background:#fff3cd;border:1px solid #ffc107;"
+        "border-radius:6px;padding:12px;margin-bottom:16px;color:#856404;'>"
+        "<strong>⚠️ Backtest Only — Not Real-Time Data</strong><br>"
+        "This is a historical simulation using resampled bars from the last 60 days. "
+        "It does not predict future outcomes. Live trading involves fees, slippage, "
+        "gap risk, and psychological factors not captured here."
+        "</div>"
+    )
+
+    # Monte Carlo limitations
+    limitations_html = ""
+    if mc.get("mc_limitations"):
+        limitations_html = (
+            "<details class='mc-limitations' style='margin:12px 0;'><summary style='cursor:pointer;font-weight:600;"
+            "color:#dc3545;'>⚠️ Monte Carlo Limitations (click to expand)</summary>"
+            "<ul style='margin:8px 0 0 20px;font-size:0.9rem;line-height:1.6;color:#666;'>"
+            + "".join(f"<li>{_esc(lim)}</li>" for lim in mc["mc_limitations"])
+            + "</ul></details>"
+        )
+
+    # Histogram - gross outcomes
     hist_html = ""
     if mc.get("histogram"):
-        hist_html = f"<div id='tm-check-hist'>{_mc_histogram_svg(mc['histogram'])}</div>"
+        hist_html = f"<div id='tm-check-hist'>{_mc_histogram_svg(mc['histogram'], 'mc-hist-canvas-gross')}</div>"
+
+    # Histogram - net outcomes (after costs)
+    hist_net_html = ""
+    if mc.get("histogram_net"):
+        hist_net_html = (
+            "<details style='margin:12px 0;'><summary style='cursor:pointer;font-weight:600;color:#0066cc;'>"
+            "📊 Distribution After Costs (Net R) — click to expand</summary>"
+            f"<div id='tm-check-hist-net'>{_mc_histogram_svg(mc['histogram_net'], 'mc-hist-canvas-net')}</div>"
+            "</details>"
+        )
+
+    # Charges/Slippage scenarios table
+    charges_html = ""
+    if mc.get("brokerage_scenarios") and mc.get("slippage_scenarios"):
+        entry = result.get("entry", 0)
+        risk = abs(entry - result.get("stop", 0))
+        reward = abs(result.get("target", 0) - entry)
+        rr = reward / risk if risk else 0
+
+        charges_html = (
+            "<details style='margin:12px 0;'><summary style='cursor:pointer;font-weight:600;color:#0066cc;'>"
+            "💰 Charges & Slippage Scenarios — click to expand</summary>"
+            "<table style='width:100%;border-collapse:collapse;margin-top:8px;font-size:0.9rem;'>"
+            "<thead><tr style='background:#f5f5f5;'>"
+            "<th style='border:1px solid #ddd;padding:8px;text-align:left;'>Brokerage ₹/order</th>"
+            "<th style='border:1px solid #ddd;padding:8px;text-align:left;'>Slippage bps/side</th>"
+            "<th style='border:1px solid #ddd;padding:8px;text-align:right;'>Cost per trade (₹)</th>"
+            "<th style='border:1px solid #ddd;padding:8px;text-align:right;'>Cost in R</th>"
+            "<th style='border:1px solid #ddd;padding:8px;text-align:right;'>Avg R (gross)</th>"
+            "<th style='border:1px solid #ddd;padding:8px;text-align:right;'>Avg R (net)</th>"
+            "</tr></thead><tbody>"
+        )
+        avg_r_gross = mc.get("avg_r", 0)
+        for br in mc["brokerage_scenarios"]:
+            for sl in mc["slippage_scenarios"]:
+                slippage_factor = sl / 10000.0
+                cost_per_trade = 2 * br + 2 * entry * slippage_factor
+                cost_in_r = cost_per_trade / risk if risk else 0
+                avg_r_net = avg_r_gross - cost_in_r
+                charges_html += (
+                    f"<tr><td style='border:1px solid #ddd;padding:8px;'>{br}</td>"
+                    f"<td style='border:1px solid #ddd;padding:8px;'>{sl}</td>"
+                    f"<td style='border:1px solid #ddd;padding:8px;text-align:right;'>{cost_per_trade:,.2f}</td>"
+                    f"<td style='border:1px solid #ddd;padding:8px;text-align:right;'>{cost_in_r:.3f}</td>"
+                    f"<td style='border:1px solid #ddd;padding:8px;text-align:right;'>{avg_r_gross:+.3f}</td>"
+                    f"<td style='border:1px solid #ddd;padding:8px;text-align:right;'>{avg_r_net:+.3f}</td></tr>"
+                )
+        charges_html += "</tbody></table></details>"
+
     body = (
-        hist_html
+        warning_banner
+        + limitations_html
+        + hist_html
+        + hist_net_html
+        + charges_html
         + f"<p>Monte Carlo — {mc['n']:,} replays, apne trade ke levels par.</p>"
         f"<div class='table-wrap'><table><tr><th>Outcome</th><th>Share</th></tr>"
         f"<tr><td>Target first (win)</td><td>{mc['target_first_pct']:.1f}%</td></tr>"
         f"<tr><td>Stop first (loss)</td><td>{mc['stop_first_pct']:.1f}%</td></tr>"
         f"<tr><td>Neither (flat by 15:15)</td><td>{mc['neither_pct']:.1f}%</td></tr></table></div>"
-        f"<p>Average outcome: {mc['avg_r']:+.2f}R. Best case (target hit): "
-        f"+{mc['best_case_r']:.1f}R. Worst case (stop hit): {mc['worst_case_r']:.1f}R. "
-        f"Verdict: {mc['verdict']} (break-even {mc['break_even_pct']:.1f}% "
-        f"target-first among decisive replays). "
-        f"Reality check only — resampled bars cannot see the future, and "
-        f"fees/slippage are ignored.</p>"
+        f"<p>Average outcome (gross): <b>{mc['avg_r']:+.2f}R</b>. "
+        f"Average outcome (net of default costs): <b>{mc.get('avg_r_net', mc['avg_r']):+.2f}R</b>. "
+        f"Best case (target hit): +{mc['best_case_r']:.1f}R. Worst case (stop hit): {mc['worst_case_r']:.1f}R. "
+        f"Verdict: <b>{mc['verdict']}</b> (break-even {mc['break_even_pct']:.1f}% "
+        f"target-first among decisive replays).</p>"
     )
     if tc.get("available"):
         body += (
@@ -3136,8 +3509,8 @@ def paper_page(lang: str) -> str:
         "<div class='chk-box'>"
         "<div class='ml-h' style='margin-bottom:4px'><b style='font-size:11px'>✅ PRE-TRADE CHECKLIST</b><span class='sp'></span>"
         "<span class='pill' id='pro-chk-badge'>2 / 4 READY</span></div>"
-        "<label class='chk-item'><input type='checkbox' class='pro-pre-chk' checked onchange='BhanuPro.updateChecklist()'> Smart Money / Sector same direction mein hai?</label>"
-        "<label class='chk-item'><input type='checkbox' class='pro-pre-chk' checked onchange='BhanuPro.updateChecklist()'> R:R kam se kam 1:2 hai?</label>"
+        "<label class='chk-item'><input type='checkbox' class='pro-pre-chk' onchange='BhanuPro.updateChecklist()'> Smart Money / Sector same direction mein hai?</label>"
+        "<label class='chk-item'><input type='checkbox' class='pro-pre-chk' onchange='BhanuPro.updateChecklist()'> R:R kam se kam 1:2 hai?</label>"
         "<label class='chk-item'><input type='checkbox' class='pro-pre-chk' onchange='BhanuPro.updateChecklist()'> Stop Loss fixed hai?</label>"
         "<label class='chk-item'><input type='checkbox' class='pro-pre-chk' onchange='BhanuPro.updateChecklist()'> 15:15 flat rule yaad hai?</label>"
         "</div>"
@@ -3315,6 +3688,37 @@ def _api_levelschart(query: dict) -> dict:
         return {"symbol": symbol, "candles": [], "error": str(exc)}
 
 
+def _ensure_mc_extras(mc: dict, setup: dict | None = None) -> dict:
+    """Ensure R1-E2 keys (mc_limitations, histogram_net, brokerage_scenarios,
+    slippage_scenarios) are always populated on the Monte Carlo dict."""
+    if not mc or not mc.get("available"):
+        return mc
+    if (
+        mc.get("mc_limitations")
+        and mc.get("histogram_net")
+        and mc.get("brokerage_scenarios")
+        and mc.get("slippage_scenarios")
+    ):
+        return mc
+    # Re-run with default brokerage (₹20/order) & slippage (5 bps/side) if missing
+    if setup:
+        try:
+            refreshed = timecheck_mod.monte_carlo_summary(
+                setup, brokerage_per_order=20.0, slippage_bps=5.0
+            )
+            if refreshed.get("available"):
+                return refreshed
+        except Exception:  # noqa: BLE001
+            pass
+    enriched = dict(mc)
+    enriched.setdefault("mc_limitations", list(timecheck_mod.MC_LIMITATIONS))
+    enriched.setdefault("brokerage_scenarios", list(timecheck_mod.BROKERAGE_SCENARIOS))
+    enriched.setdefault("slippage_scenarios", list(timecheck_mod.SLIPPAGE_SCENARIOS))
+    if not enriched.get("histogram_net") and enriched.get("histogram"):
+        enriched["histogram_net"] = enriched["histogram"]
+    return enriched
+
+
 def _api_timemachine() -> dict:
     data = poller_mod.get_timemachine()
     if data is None:
@@ -3325,7 +3729,9 @@ def _api_timemachine() -> dict:
         except Exception as exc:  # noqa: BLE001
             return {"error": str(exc)}
     out = dict(data)
-    out["html"] = _timemachine_body(data)
+    if out.get("monte_carlo"):
+        out["monte_carlo"] = _ensure_mc_extras(out["monte_carlo"], out.get("setup"))
+    out["html"] = _timemachine_body(out)
     return out
 
 
