@@ -31,15 +31,15 @@ html[data-theme="light"] {
   --surface-accent: #DBEAFE;
 
   /* CALL (Green) & PUT (Red) */
-  --up: #059669;
-  --up-bright: #10B981;
-  --upbg: rgba(5, 150, 105, 0.11);
-  --upmid: rgba(5, 150, 105, 0.35);
+  --up: #2f9e5f;
+  --up-bright: #3aa86f;
+  --upbg: rgba(47, 158, 95, 0.15);
+  --upmid: rgba(47, 158, 95, 0.35);
 
-  --down: #E11D48;
-  --down-bright: #F43F5E;
-  --downbg: rgba(225, 29, 72, 0.10);
-  --downmid: rgba(225, 29, 72, 0.34);
+  --down: #d6455d;
+  --down-bright: #de5a72;
+  --downbg: rgba(214, 69, 93, 0.15);
+  --downmid: rgba(214, 69, 93, 0.35);
 
   --gold: #D97706;
   --gold-bg: rgba(217, 119, 6, 0.10);
@@ -77,15 +77,15 @@ html[data-theme="dark"] {
   --surface-accent: rgba(59, 130, 246, 0.18);
 
   /* CALL (Green) & PUT (Red) */
-  --up: #10B981;
-  --up-bright: #00E676;
-  --upbg: rgba(16, 185, 129, 0.15);
-  --upmid: rgba(16, 185, 129, 0.38);
+  --up: #2f9e5f;
+  --up-bright: #3aa86f;
+  --upbg: rgba(47, 158, 95, 0.18);
+  --upmid: rgba(47, 158, 95, 0.38);
 
-  --down: #F43F5E;
-  --down-bright: #FB7185;
-  --downbg: rgba(244, 63, 94, 0.15);
-  --downmid: rgba(244, 63, 94, 0.38);
+  --down: #d6455d;
+  --down-bright: #de5a72;
+  --downbg: rgba(214, 69, 93, 0.18);
+  --downmid: rgba(214, 69, 93, 0.38);
 
   --gold: #F59E0B;
   --gold-bg: rgba(245, 158, 11, 0.15);
@@ -130,7 +130,8 @@ body {
 .tpanel .tr,
 .tpanel .rrl,
 .setup-stats b,
-.chain-table {
+.chain-table,
+.px {
   font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
   font-variant-numeric: tabular-nums;
 }
@@ -486,6 +487,101 @@ nav.seg a.on {
   letter-spacing: 0.03em;
 }
 
+/* ORB & Signal State Badges (R1-D1) */
+.state-pill {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--card-2);
+  color: var(--muted);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.state-pill.state-scanned,
+.state-pill.state-new {
+  background: var(--blue-bg);
+  color: var(--blue);
+  border-color: var(--blue-border);
+}
+
+.state-pill.state-breakout,
+.state-pill.state-retested {
+  background: var(--gold-bg);
+  color: var(--gold);
+  border-color: var(--gold-border);
+}
+
+.state-pill.state-ready,
+.state-pill.state-confirmed {
+  background: var(--upbg);
+  color: var(--up);
+  border-color: var(--upmid);
+}
+
+.state-pill.state-invalidated {
+  background: var(--downbg);
+  color: var(--down);
+  border-color: var(--downmid);
+}
+
+/* Levels Summary Strip & Strength Score Pills (Part 2 Item G) */
+.levels-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.levels-summary-cell {
+  background: var(--card-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  padding: 8px 9px;
+}
+
+.levels-summary-cell small {
+  display: block;
+  font-size: 9.5px;
+  font-weight: 800;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.levels-summary-cell strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.str-pill {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+}
+
+.str-pill.strong {
+  background: var(--upbg);
+  color: var(--up);
+  border-color: var(--upmid);
+}
+
+.str-pill.medium {
+  background: var(--gold-bg);
+  color: var(--gold);
+  border-color: var(--gold-border);
+}
+
 .btn-primary,
 .btn-ghost {
   display: inline-flex;
@@ -735,16 +831,44 @@ body.is-market-closed .mood-strip {
   display: block;
 }
 
+/* R1-C1: Quote status (bottom-left) & quote source (bottom-right) neatly above .foot */
 .quote-status {
   position: absolute;
   left: 8px;
   bottom: 35px;
+  max-width: 105px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--muted);
   background: var(--card);
-  padding: 0 4px;
+  padding: 1px 5px;
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 9.5px;
+  line-height: 1.35;
   z-index: 2;
+}
+
+.quote-source {
+  position: absolute;
+  right: 8px;
+  bottom: 35px;
+  max-width: calc(100% - 122px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  background: var(--card);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 9.5px;
+  line-height: 1.35;
+  text-align: right;
+  z-index: 2;
+}
+
+.quote-source:empty {
+  display: none;
 }
 
 .icard .foot {
@@ -1115,7 +1239,8 @@ body.is-market-closed .bot-live-ribbon {
 }
 
 .stock-head .px {
-  font: 800 22px/1 'JetBrains Mono', monospace;
+  font: 800 22px/1 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 .setup-stats {
@@ -1489,7 +1614,7 @@ body.is-market-closed .bot-live-ribbon {
 }
 
 /* =========================================================================
-   11. IN-APP MODALS, TOAST & 7-TAB MOBILE BOTTOM NAVIGATION
+   11. IN-APP MODALS, TOAST & 7-TAB BOTTOM NAVIGATION (MOBILE + PC DESKTOP)
    ========================================================================= */
 .pro-toast {
   position: fixed;
@@ -1544,8 +1669,7 @@ body.is-market-closed .bot-live-ribbon {
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
 }
 
-/* 7-Tab Bottom Nav (visible by default — shown on mobile/tablet, hidden only on wide desktop).
-   Fail-visible: if a media query is ever mis-evaluated, the nav shows instead of vanishing. */
+/* 7-Tab Bottom Nav — visible on both 390px Mobile and PC Desktop Wide */
 .bottom-nav {
   display: grid;
   position: fixed;
@@ -1558,12 +1682,6 @@ body.is-market-closed .bot-live-ribbon {
   grid-template-columns: repeat(7, minmax(0, 1fr));
   padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
   backdrop-filter: blur(8px);
-}
-
-@media (min-width: 961px) {
-  .bottom-nav {
-    display: none;
-  }
 }
 
 .bottom-nav a {
@@ -1591,7 +1709,7 @@ body.is-market-closed .bot-live-ribbon {
 }
 
 /* =========================================================================
-   12. RESPONSIVE BREAKPOINTS (900px TABLET & 390px–620px MOBILE-FIRST)
+   12. RESPONSIVE BREAKPOINTS (960px TABLET & 390px–620px MOBILE-FIRST)
    ========================================================================= */
 @media (max-width: 960px) {
   .index-charts,
@@ -1600,6 +1718,10 @@ body.is-market-closed .bot-live-ribbon {
   .pro-grid-2,
   .bot-split {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .levels-summary-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .sm-stage {
@@ -1659,7 +1781,8 @@ body.is-market-closed .bot-live-ribbon {
     padding: 3px 6px;
   }
 
-  .mood-grid {
+  .mood-grid,
+  .levels-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px;
   }
