@@ -53,12 +53,30 @@ MC_BREAKEVEN_2R = 100.0 / 3.0
 #: proven stale, and blocking on it would be a guess either way.
 FRESH_WINDOW = timedelta(hours=24)
 
+#: Display labels for signal lifecycle states.
+SIGNAL_STATE_LABELS: dict[str, str] = {
+    "new": "NEW",
+    "confirmed": "CONFIRMED",
+    "retested": "RETESTED",
+    "invalidated": "INVALIDATED",
+}
+
 
 def opt_label(direction: str) -> str:
     """User-facing option label for a trade direction: CALL for a long,
     PUT for a short. Display only — the internal direction stays
     'long'/'short' everywhere (logic, API, sizing)."""
     return "PUT" if str(direction).lower() == "short" else "CALL"
+
+
+def signal_state_label(state: str | None) -> str:
+    """Return the user-facing display label for a signal_state value
+    (``new`` -> ``NEW``, ``confirmed`` -> ``CONFIRMED``,
+    ``retested`` -> ``RETESTED``, ``invalidated`` -> ``INVALIDATED``)."""
+    if not state:
+        return "NEW"
+    key = str(state).strip().lower()
+    return SIGNAL_STATE_LABELS.get(key, key.upper())
 
 
 # ---------------------------------------------------------------------------
@@ -520,25 +538,36 @@ def entry_signal(
     factor inputs; any that is None is fetched live (news and volume
     are quick; the Monte Carlo is slow — pass the cached
     /timemachine result on the dashboard). Returns the decision
-    (ENTER / HALF SIZE / BLOCKED), the size factor, entry/SL/TP1/TP2/TP3
-    and every factor's verdict + reason.
+    (ENTER / HALF SIZE / BLOCKED), ``signal_state``
+    (new/confirmed/retested/invalidated), ``side`` (CALL/PUT),
+    the size factor, entry/SL/TP1/TP2/TP3, ``targets``, ``reason``,
+    ``timestamp_ist``, and every factor's verdict + reason.
     """
     if direction not in ("long", "short"):
         raise ValueError(f"direction must be 'long' or 'short', got {direction!r}")
+    side = opt_label(direction)
+    now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     if not entry or not stop or not target:
+        no_sig_reason = "No ORB setup — no entry, stop or target today."
         return {
             "symbol": symbol,
             "direction": direction,
+            "side": side,
             "decision": "NO SIGNAL",
+            "signal_state": "new",
+            "signal_state_label": signal_state_label("new"),
             "size_factor": 0.0,
             "entry": entry,
             "stop": stop,
             "tp1": tp1,
             "tp2": target,
             "tp3": tp3,
+            "targets": {"tp1": tp1, "tp2": target, "tp3": tp3},
             "factors": {},
-            "reasons": ["No ORB setup — no entry, stop or target today."],
-            "summary": f"{symbol} {opt_label(direction)}: no ORB signal today.",
+            "reason": no_sig_reason,
+            "reasons": [no_sig_reason],
+            "summary": f"{symbol} {side}: no ORB signal today.",
+            "timestamp_ist": now_ist,
         }
     risk = abs(float(entry) - float(stop))
     sign = 1.0 if direction == "long" else -1.0
@@ -558,7 +587,7 @@ def entry_signal(
         "orb": {
             "verdict": "trigger",
             "reason": (
-                f"ORB {opt_label(direction)}: first completed 5m bar closed "
+                f"ORB {side}: first completed 5m bar closed "
                 f"{'above' if direction == 'long' else 'below'} the "
                 f"09:15–09:30 range at {float(entry):,.2f}."
             ),
@@ -585,28 +614,49 @@ def entry_signal(
     blocked = [name for name, f in factors.items() if f["verdict"] == "block"]
     halved = [name for name, f in factors.items() if f["verdict"] == "half"]
     if decision == "BLOCKED":
-        summary = f"{symbol} {opt_label(direction)}: BLOCKED by {', '.join(blocked)}."
+        summary = f"{symbol} {side}: BLOCKED by {', '.join(blocked)}."
     elif decision == "HALF SIZE":
-        summary = f"{symbol} {opt_label(direction)}: HALF SIZE — {', '.join(halved)}."
+        summary = f"{symbol} {side}: HALF SIZE — {', '.join(halved)}."
     else:
         summary = (
-            f"{symbol} {opt_label(direction)}: ENTER @ {float(entry):,.2f}, "
+            f"{symbol} {side}: ENTER @ {float(entry):,.2f}, "
             f"SL {float(stop):,.2f}, TP1 {float(tp1):,.2f} / "
             f"TP2 {float(target):,.2f} / TP3 {float(tp3):,.2f}."
         )
+    # Signal states: new, confirmed, retested, invalidated.
+    vol_verdict = factors.get("volume", {}).get("volume_verdict", "normal")
+    signal_state = "new"
+    if vol_verdict == "STRONG":
+        signal_state = "confirmed"
+    elif vol_verdict == "WEAK":
+        signal_state = "retested"
+
+    if decision == "BLOCKED":
+        signal_state = "invalidated"
+
     return {
         "symbol": symbol,
         "direction": direction,
+        "side": side,
         "decision": decision,
+        "signal_state": signal_state,
+        "signal_state_label": signal_state_label(signal_state),
         "size_factor": size_factor,
         "entry": float(entry),
         "stop": float(stop),
         "tp1": float(tp1),
         "tp2": float(target),
         "tp3": float(tp3),
+        "targets": {
+            "tp1": float(tp1),
+            "tp2": float(target),
+            "tp3": float(tp3),
+        },
         "factors": factors,
+        "reason": summary,
         "reasons": reasons,
         "summary": summary,
+        "timestamp_ist": now_ist,
     }
 
 
@@ -631,6 +681,8 @@ def exit_signal(
     """
     if direction not in ("long", "short"):
         raise ValueError(f"direction must be 'long' or 'short', got {direction!r}")
+    side = opt_label(direction)
+    now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     if news_result is None:
         try:
             from bhanu import news as news_mod
@@ -640,22 +692,30 @@ def exit_signal(
             return {
                 "symbol": symbol,
                 "direction": direction,
+                "side": side,
                 "action": "HOLD",
+                "signal_state": "confirmed",
+                "signal_state_label": signal_state_label("confirmed"),
                 "reason": "News unavailable — hold on price action (stop/target unchanged).",
                 "headline": "",
                 "source": "",
                 "published": "",
+                "timestamp_ist": now_ist,
                 "error": str(exc),
             }
     if news_result.get("unavailable"):
         return {
             "symbol": symbol,
             "direction": direction,
+            "side": side,
             "action": "HOLD",
+            "signal_state": "confirmed",
+            "signal_state_label": signal_state_label("confirmed"),
             "reason": "News unavailable — hold on price action (stop/target unchanged).",
             "headline": "",
             "source": "",
             "published": "",
+            "timestamp_ist": now_ist,
         }
     fresh = _fresh_items(news_result)
     against: list[dict[str, Any]] = []
@@ -670,11 +730,15 @@ def exit_signal(
         return {
             "symbol": symbol,
             "direction": direction,
+            "side": side,
             "action": "HOLD",
+            "signal_state": "confirmed",
+            "signal_state_label": signal_state_label("confirmed"),
             "reason": "No fresh news against this position.",
             "headline": "",
             "source": "",
             "published": "",
+            "timestamp_ist": now_ist,
         }
     top = against[0]
     severe = (
@@ -684,12 +748,16 @@ def exit_signal(
         or bool(set(top.get("tags", []) or []) & {"legal", "halt"})
     )
     action = "EXIT NOW" if severe else "EXIT EARLY"
+    sig_state = "invalidated" if severe else "retested"
     return {
         "symbol": symbol,
         "direction": direction,
+        "side": side,
         "action": action,
+        "signal_state": sig_state,
+        "signal_state_label": signal_state_label(sig_state),
         "reason": (
-            f"{action} — fresh news against this {opt_label(direction)}: "
+            f"{action} — fresh news against this {side}: "
             f"'{top.get('title', '')}' ({top.get('source', '')}"
             + (f", {top.get('published', '')}" if top.get("published") else "")
             + f") — {len(against)} against item(s)."
@@ -697,6 +765,7 @@ def exit_signal(
         "headline": top.get("title", ""),
         "source": top.get("source", ""),
         "published": top.get("published", ""),
+        "timestamp_ist": now_ist,
     }
 
 
@@ -739,9 +808,9 @@ def main() -> int:
     for name, kwargs in cases:
         sig = entry_signal("NIFTY", "long", 25730.0, 25702.5, 25785.0,
                            support=25687.0, resistance=25800.0, **kwargs)
-        print(f"{name}: {sig['decision']} (size {sig['size_factor']}) — {sig['summary']}")
+        print(f"{name}: {sig['decision']} [{sig['signal_state_label']}] (size {sig['size_factor']}) — {sig['summary']}")
     ex = exit_signal("NIFTY", "long", 25730.0, news_result=news_bad)
-    print(f"exit on bad news: {ex['action']} — {ex['reason']}")
+    print(f"exit on bad news: {ex['action']} [{ex['signal_state_label']}] — {ex['reason']}")
     return 0
 
 
