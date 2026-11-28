@@ -9,6 +9,9 @@
  *  - Smooth 60fps canvas & chart easing when market is OPEN
  *  - HARD MARKET-CLOSED FREEZE: stops polling, freezes prices/charts flat,
  *    halts pulsing/radar animations, and displays a clear "Market Closed" badge
+ *  - Exposed renderMcHistCanvas (window + BhanuPro) with mean line & SD zones
+ *  - Real ORB & signal state rendering (SCANNED / BREAKOUT / TRADE READY,
+ *    NEW / CONFIRMED / RETESTED / INVALIDATED) with CALL (green) / PUT (red)
  *  - Zero fake/fabricated market prices — uses only real backend responses
  */
 (function (global) {
@@ -31,15 +34,19 @@
     marketOpen: false,
     marketStatusChecked: false,
     pollerStatus: null,
-    quotes: {},          // symbol -> { price, prev_close, change_pct, error }
-    liveAnim: {},        // key -> { from, to, current, startTs, duration }
-    canvasCharts: {},    // canvasId -> { canvas, type, data, levels, overlays, rafPending }
+    lastQuote: null,
+    quotes: {},          // symbol -> { price, prev_close, change_pct, timestamp, stale, error }
+    liveTicks: {},       // symbol -> { ltp, prev, change_pct, time }
+    orbSnapshot: null,   // latest real ORB scan payload from /api/orb
+    liveAnim: {},        // key -> { token, start }
+    canvasCharts: {},    // canvasId -> { canvas, type, candles, line, vwap, levels, overlays }
     timers: {
       clock: null,
       livePoll: null,
       marketCheck: null,
       botRibbon: null,
-      replay: null
+      replay: null,
+      paperQuote: null
     },
     bot: {
       scanning: false,
@@ -101,6 +108,24 @@
     return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
   }
 
+  function fmtIstStamp(tsSeconds) {
+    if (!tsSeconds) return '';
+    try {
+      const dt = new Date(Number(tsSeconds) * 1000);
+      return dt.toLocaleString('en-IN', {
+        timeZone: IST_TZ,
+        day: '2-digit',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+      }) + ' IST';
+    } catch (e) {
+      return '';
+    }
+  }
+
   function optLabel(dir) {
     const d = String(dir || '').toLowerCase();
     if (d === 'short' || d === 'put' || d === 'sell') return 'PUT';
@@ -110,6 +135,22 @@
 
   function optClass(dir) {
     return optLabel(dir) === 'PUT' ? 'opt-put' : 'opt-call';
+  }
+
+  function stateBadgeHtml(rawState) {
+    const norm = String(rawState || 'scanned').trim().toLowerCase();
+    const map = {
+      'warming up': { cls: 'state-scanned', label: 'WARMING UP' },
+      'scanned': { cls: 'state-scanned', label: 'SCANNED' },
+      'breakout': { cls: 'state-breakout', label: 'BREAKOUT' },
+      'trade ready': { cls: 'state-ready', label: 'TRADE READY' },
+      'new': { cls: 'state-new', label: 'NEW' },
+      'confirmed': { cls: 'state-confirmed', label: 'CONFIRMED' },
+      'retested': { cls: 'state-retested', label: 'RETESTED' },
+      'invalidated': { cls: 'state-invalidated', label: 'INVALIDATED' }
+    };
+    const info = map[norm] || { cls: 'state-scanned', label: norm.toUpperCase() };
+    return '<span class="state-pill ' + info.cls + '">' + escHtml(info.label) + '</span>';
   }
 
   function fetchJson(url, timeoutMs) {
@@ -210,19 +251,25 @@
   // =========================================================================
   function getCanvasPalette() {
     const dark = state.theme === 'dark';
+    const forestGreen = '#2f9e5f';
+    const forestGreenSoft = dark ? 'rgba(47, 158, 95, 0.18)' : 'rgba(47, 158, 95, 0.12)';
+    const brickRed = '#d6455d';
+    const brickRedSoft = dark ? 'rgba(214, 69, 93, 0.18)' : 'rgba(214, 69, 93, 0.12)';
     return {
       bg: dark ? '#0D131F' : '#FFFFFF',
       grid: dark ? 'rgba(148, 163, 184, 0.12)' : 'rgba(15, 23, 42, 0.07)',
       divider: dark ? 'rgba(148, 163, 184, 0.34)' : 'rgba(15, 23, 42, 0.22)',
       axisText: dark ? '#94A3B8' : '#475569',
       pillText: '#FFFFFF',
-      bull: dark ? '#10B981' : '#059669',
-      bullSoft: dark ? 'rgba(16, 185, 129, 0.20)' : 'rgba(5, 150, 105, 0.14)',
-      bear: dark ? '#F43F5E' : '#E11D48',
-      bearSoft: dark ? 'rgba(244, 63, 94, 0.20)' : 'rgba(225, 29, 72, 0.14)',
+      bull: forestGreen,
+      bullSoft: forestGreenSoft,
+      bear: brickRed,
+      bearSoft: brickRedSoft,
       blue: dark ? '#60A5FA' : '#2563EB',
       gold: dark ? '#F59E0B' : '#D97706',
-      purple: dark ? '#A855F7' : '#7C3AED'
+      purple: dark ? '#A855F7' : '#7C3AED',
+      obOpacity: 0.38,
+      fvgOpacity: 0.30
     };
   }
 
@@ -252,10 +299,11 @@
       });
     }
 
-    // Re-paint all custom canvas charts in the new theme
+    // Re-paint all custom canvas charts & Monte Carlo histograms in the new theme
     Object.keys(state.canvasCharts).forEach(function (cid) {
       renderCanvasChart(cid);
     });
+    renderAllMcCanvases();
     if ($('replay-canvas')) drawReplayCanvas();
   }
 
@@ -322,33 +370,24 @@
     if (pollerInfo) state.pollerStatus = pollerInfo;
 
     document.body.classList.toggle('is-market-closed', !state.marketOpen);
+    updateMarketBadge();
 
-    // Update top header Market Badge
-    const badge = $('market-status-badge');
-    if (badge) {
-      badge.classList.toggle('closed', !state.marketOpen);
-      badge.innerHTML = state.marketOpen
-        ? '<span class="dot"></span> LIVE · 2s'
-        : '<span class="dot"></span> Market Closed';
-    }
-
-    // Update main LIVE indicator bar
     const ind = $('bhanu-live-indicator');
     if (ind) {
       ind.classList.toggle('market-closed', !state.marketOpen);
       if (!state.marketOpen) {
         ind.innerHTML = '<span class="dot"></span> Market Closed · Prices &amp; charts frozen (last NSE snapshot)';
+      } else if (!ind.getAttribute('data-last')) {
+        ind.innerHTML = '<span class="dot"></span> LIVE · loading…';
       }
     }
 
-    // Update Market Mood strip badge if present
     const moodBadge = $('mood-status-badge');
     if (moodBadge && !state.marketOpen) {
       moodBadge.textContent = 'MARKET CLOSED · FROZEN';
       moodBadge.className = 'pill down';
     }
 
-    // Update Bot ribbon status when closed
     const botTicker = $('bot-live-ticker');
     const botStatus = $('bot-scan-status');
     if (!state.marketOpen) {
@@ -388,7 +427,6 @@
       clearInterval(state.timers.botRibbon);
       state.timers.botRibbon = null;
     }
-    // Also halt legacy app.py timers if they were started while closed
     if (global.bhanuQuoteTimer) {
       clearInterval(global.bhanuQuoteTimer);
       global.bhanuQuoteTimer = null;
@@ -397,8 +435,27 @@
       clearInterval(global.bhanuLiveTimers[k]);
       delete global.bhanuLiveTimers[k];
     });
-    // Cancel any active glide animations so charts stay 100% flat
     state.liveAnim = {};
+  }
+
+  function updateMarketBadge() {
+    const badge = $('market-status-badge');
+    if (!badge) return;
+    if (state.marketOpen) {
+      badge.classList.remove('closed');
+      badge.innerHTML = '<span class="dot"></span> LIVE · 2s';
+    } else {
+      badge.classList.add('closed');
+      const lastQuote = state.lastQuote;
+      if (lastQuote && lastQuote.price !== null && lastQuote.price !== undefined) {
+        const stamp = fmtIstStamp(lastQuote.timestamp);
+        badge.innerHTML = '<span class="dot"></span> Market Closed · ' +
+          fmtNum(lastQuote.price, 2) +
+          (stamp ? ' · ' + escHtml(stamp) : '');
+      } else {
+        badge.innerHTML = '<span class="dot"></span> Market Closed';
+      }
+    }
   }
 
   function startLiveTimers() {
@@ -412,7 +469,150 @@
   }
 
   // =========================================================================
-  // 5. 2-SECOND LIVE POLLER & 60FPS SMOOTH EASING ENGINE (OPEN MARKET ONLY)
+  // 5. ORB & SIGNAL STATE RENDERING (R1-D1 — REAL /api/orb + LIVE TICKS)
+  // =========================================================================
+  function deriveLiveOrbState(item, livePrice) {
+    const baseState = String(item.state || 'scanned').toLowerCase();
+    const rh = Number(item.range_high);
+    const rl = Number(item.range_low);
+    const dir = String(item.direction || '').toLowerCase();
+    let orbState = baseState;
+    let sigState = item.signal_state ? String(item.signal_state).toLowerCase() : null;
+
+    if (livePrice != null && !isNaN(livePrice) && !isNaN(rh) && !isNaN(rl) && rh > rl) {
+      if (baseState === 'scanned') {
+        if (livePrice > rh || livePrice < rl) {
+          orbState = 'breakout';
+          sigState = sigState || 'new';
+        }
+      } else if (baseState === 'breakout' || baseState === 'trade ready') {
+        if (dir === 'long') {
+          if (livePrice < rl) {
+            sigState = 'invalidated';
+          } else if (livePrice <= rh * 1.0015 && livePrice >= rl) {
+            sigState = 'retested';
+          } else if (!sigState) {
+            sigState = baseState === 'trade ready' ? 'confirmed' : 'new';
+          }
+        } else if (dir === 'short') {
+          if (livePrice > rh) {
+            sigState = 'invalidated';
+          } else if (livePrice >= rl * 0.9985 && livePrice <= rh) {
+            sigState = 'retested';
+          } else if (!sigState) {
+            sigState = baseState === 'trade ready' ? 'confirmed' : 'new';
+          }
+        }
+      }
+    }
+
+    if (!sigState) {
+      if (orbState === 'trade ready') sigState = 'confirmed';
+      else if (orbState === 'breakout') sigState = 'new';
+      else sigState = 'new';
+    }
+    return { orbState: orbState, sigState: sigState };
+  }
+
+  function renderOrbState(orbData, targetId) {
+    if (!orbData) return;
+    state.orbSnapshot = orbData;
+
+    const container = $(targetId || 'orb-hits') || $('orb-table');
+    if (!container) return;
+
+    const asOf = orbData.as_of || orbData.run_at_ist || '—';
+    const scanState = String(orbData.state || 'scanned');
+    const hits = Array.isArray(orbData.hits) ? orbData.hits : [];
+    const scanned = Array.isArray(orbData.scanned) ? orbData.scanned : [];
+
+    // Update any top ORB state summary badge if present
+    const stateBadgeHost = $('orb-global-state');
+    if (stateBadgeHost) {
+      stateBadgeHost.innerHTML = stateBadgeHtml(scanState);
+    }
+
+    // If the server already rendered the full HTML table, only patch live state cells
+    if (orbData.html && !orbData.forceClientRender) {
+      container.innerHTML = orbData.html;
+      syncOrbStatesWithLivePrices();
+      return;
+    }
+
+    let html = '<h3>ORB Hits — today</h3>' +
+      '<p class="muted">Scan status: ' + stateBadgeHtml(scanState) +
+      ' · ' + hits.length + ' breakout(s) · ' + scanned.length + ' scanned · As of ' + escHtml(asOf) + '</p>';
+
+    if (scanState.toLowerCase() === 'warming up' && !hits.length && !scanned.length) {
+      html += '<p class="loading">ORB scan warming up (09:15–09:30 IST opening range)…</p>';
+    } else if (!hits.length && !scanned.length) {
+      html += '<p class="empty-state">No ORB signals detected yet today.</p>';
+    } else {
+      html += '<div class="table-wrap"><table style="min-width:640px">' +
+        '<tr><th>Symbol</th><th>Direction</th><th>Close</th><th>Bar</th><th>Range</th><th>ORB State</th><th>Signal</th></tr>';
+
+      hits.forEach(function (h) {
+        const livePx = resolveLivePriceForSymbol(h.symbol);
+        const derived = deriveLiveOrbState(h, livePx);
+        const dirHtml = h.direction
+          ? '<span class="' + optClass(h.direction) + '">' + optLabel(h.direction) + '</span>'
+          : '—';
+        html += '<tr data-orb-sym="' + escHtml(h.symbol) + '" data-orb-rh="' + escHtml(h.range_high) +
+          '" data-orb-rl="' + escHtml(h.range_low) + '" data-orb-dir="' + escHtml(h.direction || '') +
+          '" data-orb-state="' + escHtml(h.state || 'breakout') + '">' +
+          '<td><a href="/stock?symbol=' + encodeURIComponent(h.symbol) + '"><b>' + escHtml(h.symbol) + '</b></a></td>' +
+          '<td>' + dirHtml + '</td>' +
+          '<td class="mono">' + fmtNum(h.close, 2) + '</td>' +
+          '<td class="mono">' + escHtml(h.bar_time || '—') + '</td>' +
+          '<td class="mono">' + fmtNum(h.range_high, 2) + ' – ' + fmtNum(h.range_low, 2) + '</td>' +
+          '<td class="orb-state-cell">' + stateBadgeHtml(derived.orbState) + '</td>' +
+          '<td class="sig-state-cell">' + stateBadgeHtml(derived.sigState) + '</td>' +
+          '</tr>';
+      });
+
+      scanned.slice(0, 8).forEach(function (s) {
+        const livePx = resolveLivePriceForSymbol(s.symbol);
+        const derived = deriveLiveOrbState(s, livePx);
+        html += '<tr data-orb-sym="' + escHtml(s.symbol) + '" data-orb-rh="' + escHtml(s.range_high) +
+          '" data-orb-rl="' + escHtml(s.range_low) + '" data-orb-dir="" data-orb-state="scanned">' +
+          '<td><a href="/stock?symbol=' + encodeURIComponent(s.symbol) + '"><b>' + escHtml(s.symbol) + '</b></a></td>' +
+          '<td>—</td><td class="mono">—</td><td class="mono">—</td>' +
+          '<td class="mono">' + fmtNum(s.range_high, 2) + ' – ' + fmtNum(s.range_low, 2) + '</td>' +
+          '<td class="orb-state-cell">' + stateBadgeHtml(derived.orbState) + '</td>' +
+          '<td class="sig-state-cell">' + stateBadgeHtml(derived.sigState) + '</td>' +
+          '</tr>';
+      });
+
+      html += '</table></div>';
+    }
+
+    container.innerHTML = html;
+  }
+
+  function syncOrbStatesWithLivePrices() {
+    const rows = document.querySelectorAll('tr[data-orb-sym]');
+    if (!rows.length) return;
+    rows.forEach(function (tr) {
+      const sym = tr.getAttribute('data-orb-sym');
+      const livePx = resolveLivePriceForSymbol(sym);
+      if (livePx === null) return;
+      const item = {
+        state: tr.getAttribute('data-orb-state') || 'scanned',
+        direction: tr.getAttribute('data-orb-dir') || '',
+        range_high: parseFloat(tr.getAttribute('data-orb-rh')),
+        range_low: parseFloat(tr.getAttribute('data-orb-rl')),
+        signal_state: tr.getAttribute('data-sig-state') || ''
+      };
+      const derived = deriveLiveOrbState(item, livePx);
+      const orbCell = tr.querySelector('.orb-state-cell');
+      const sigCell = tr.querySelector('.sig-state-cell');
+      if (orbCell) orbCell.innerHTML = stateBadgeHtml(derived.orbState);
+      if (sigCell) sigCell.innerHTML = stateBadgeHtml(derived.sigState);
+    });
+  }
+
+  // =========================================================================
+  // 5b. SMOOTH PRICE EASING & 2-SECOND LIVE POLLING
   // =========================================================================
   function easeInOutQuad(t) {
     return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
@@ -446,6 +646,10 @@
       const sym = q.symbol;
       const prevKnown = state.quotes[sym] ? state.quotes[sym].price : null;
       state.quotes[sym] = q;
+      if (q.price !== null && q.price !== undefined) {
+        state.lastQuote = q;
+      }
+      updateMarketBadge();
 
       const slug = String(sym).replace(/[^A-Za-z0-9]/g, '').toLowerCase();
       const priceEl = $('q-' + slug + '-price');
@@ -453,11 +657,33 @@
       const prevEl = $('q-' + slug + '-prev');
       const cardEl = $('q-' + slug + '-card');
       const statusEl = $('q-' + slug + '-status');
+      const sourceEl = $('q-' + slug + '-source');
+      const stamp = fmtIstStamp(q.timestamp);
 
       if (statusEl) {
-        statusEl.textContent = q.error
-          ? q.error
-          : (state.marketOpen ? 'Live · 2s NSE feed' : 'Market Closed · Last close');
+        if (q.error) {
+          statusEl.textContent = 'Unavailable';
+        } else if (q.price === null || q.price === undefined) {
+          statusEl.textContent = 'Unavailable';
+        } else if (!state.marketOpen) {
+          statusEl.textContent = 'Market Closed';
+        } else if (q.stale) {
+          statusEl.textContent = 'Stale';
+        } else {
+          statusEl.textContent = 'Live · 2s';
+        }
+      }
+
+      if (sourceEl) {
+        if (q.error) {
+          sourceEl.textContent = 'source error';
+        } else if (q.price === null || q.price === undefined) {
+          sourceEl.textContent = 'no price data';
+        } else if (!state.marketOpen) {
+          sourceEl.textContent = stamp ? 'last updated ' + stamp : 'last close';
+        } else {
+          sourceEl.textContent = stamp ? 'source ' + stamp : 'source live';
+        }
       }
 
       if (q.price === null || q.price === undefined) {
@@ -480,18 +706,23 @@
 
       if (chgEl && q.change_pct !== null && q.change_pct !== undefined) {
         chgEl.textContent = fmtPct(q.change_pct);
-        chgEl.className = 'index-change ' + (Number(q.change_pct) >= 0 ? 'up' : 'down');
+        chgEl.className = 'index-change price-mono ' + (Number(q.change_pct) >= 0 ? 'up' : 'down');
       }
       if (prevEl && q.prev_close !== null && q.prev_close !== undefined) {
-        prevEl.textContent = 'prev close ' + fmtNum(q.prev_close, 2);
+        let prevText = 'prev close ' + fmtNum(q.prev_close, 2);
+        if (!state.marketOpen) {
+          prevText += stamp ? ' · last updated ' + stamp : ' · last close';
+        }
+        prevEl.textContent = prevText;
       }
       if (cardEl && q.change_pct !== null && q.change_pct !== undefined) {
         cardEl.classList.toggle('neg', Number(q.change_pct) < 0);
       }
     });
 
-    // Update Market Mood Strip & Paper MTM & Smart Alerts
+    // Update Market Mood Strip, ORB live state badges, Paper MTM & Smart Alerts
     updateMoodFromQuotes();
+    syncOrbStatesWithLivePrices();
     refreshPaperMtm();
     if (state.marketOpen) evaluateSmartAlerts();
   }
@@ -532,17 +763,21 @@
           if (!p || p.error || p.ltp === null || p.ltp === undefined) return;
           const nextVal = Number(p.ltp);
           const nextTime = p.time || Math.floor(Date.now() / 1000);
+          state.liveTicks[sym] = {
+            ltp: nextVal,
+            prev: p.prev,
+            change_pct: p.change_pct,
+            time: nextTime
+          };
           const stamp = $(cid + '-stamp');
           if (stamp) {
             stamp.dataset.tick = String(nextTime);
             if (typeof global.bhanuTickLabel === 'function') global.bhanuTickLabel(stamp);
           }
 
-          // Update custom canvas chart if mounted
           if (state.canvasCharts[cid]) {
             updateCanvasChartLastPoint(cid, nextVal, nextTime);
           }
-          // Update LightweightCharts if mounted
           const lw = (global.bhanuLines || {})[cid];
           if (lw && lw.series) {
             const fromVal = lw.displayedValue != null ? lw.displayedValue : (lw.lastValue != null ? lw.lastValue : nextVal);
@@ -562,6 +797,7 @@
 
     Promise.all(jobs).then(function () {
       state.inFlight.live = false;
+      syncOrbStatesWithLivePrices();
     });
   }
 
@@ -633,7 +869,7 @@
     if (!canvas) return null;
     state.canvasCharts[canvasId] = {
       canvas: canvas,
-      type: config.type || 'candles', // 'candles' | 'line'
+      type: config.type || 'candles',
       candles: Array.isArray(config.candles) ? config.candles.slice() : [],
       line: Array.isArray(config.line) ? config.line.slice() : [],
       vwap: Array.isArray(config.vwap) ? config.vwap.slice() : [],
@@ -717,7 +953,6 @@
     const up = vals[vals.length - 1] >= vals[0];
     const col = up ? pal.bull : pal.bear;
 
-    // Area fill
     const grad = ctx.createLinearGradient(0, padT, 0, H - padB);
     grad.addColorStop(0, up ? pal.bullSoft : pal.bearSoft);
     grad.addColorStop(1, 'rgba(0,0,0,0)');
@@ -729,7 +964,6 @@
     ctx.fillStyle = grad;
     ctx.fill();
 
-    // Line
     ctx.strokeStyle = col;
     ctx.lineWidth = 1.8;
     ctx.beginPath();
@@ -739,21 +973,24 @@
     });
     ctx.stroke();
 
-    // Right price pill
-    const lastV = vals[vals.length - 1];
-    const ly = yOf(lastV);
+    const lastIdx = pts.length - 1;
+    const lastX = xOf(lastIdx);
+    const lastY = yOf(vals[lastIdx]);
+    ctx.shadowColor = col;
+    ctx.shadowBlur = 8;
     ctx.fillStyle = col;
     ctx.beginPath();
-    ctx.arc(xOf(pts.length - 1), ly, 3, 0, Math.PI * 2);
+    ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
     ctx.fill();
+    ctx.shadowBlur = 0;
 
-    const pillY = Math.max(4, Math.min(H - 20, ly - 8));
+    const pillY = Math.max(4, Math.min(H - 20, lastY - 8));
     drawRoundRect(ctx, W - padR + 3, pillY, padR - 5, 16, 4);
     ctx.fill();
     ctx.fillStyle = pal.pillText;
-    ctx.font = '700 9px ui-monospace, monospace';
+    ctx.font = '700 9px "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(lastV >= 10000 ? lastV.toFixed(0) : lastV.toFixed(1), W - padR + (padR - 2) / 2, pillY + 11);
+    ctx.fillText(vals[lastIdx] >= 10000 ? vals[lastIdx].toFixed(0) : vals[lastIdx].toFixed(1), W - padR + (padR - 2) / 2, pillY + 11);
   }
 
   function drawCandlesCanvas(ctx, W, H, chart, pal) {
@@ -781,10 +1018,9 @@
     const slotW = plotW / n;
     const bodyW = Math.max(2.5, Math.min(10, Math.floor(slotW * 0.64)));
 
-    // Gridlines
     ctx.strokeStyle = pal.grid;
     ctx.fillStyle = pal.axisText;
-    ctx.font = '600 9px ui-monospace, monospace';
+    ctx.font = '600 9px "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace';
     ctx.textAlign = 'left';
     for (let g = 0; g <= 4; g++) {
       const y = padT + (g / 4) * priceH;
@@ -796,7 +1032,6 @@
       ctx.fillText(val >= 10000 ? val.toFixed(0) : val.toFixed(1), W - padR + 4, y + 3);
     }
 
-    // Support / Resistance / Entry / Stop / Target / ORB lines
     if (chart.overlays.levels) {
       chart.levels.forEach(function (lv) {
         if (lv.price == null) return;
@@ -813,11 +1048,10 @@
         ctx.restore();
 
         ctx.fillStyle = col;
-        ctx.font = '700 8px ui-monospace, monospace';
+        ctx.font = '700 8px "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace';
         ctx.textAlign = 'left';
         ctx.fillText(String(lv.label || ''), padL + 3, y - 3);
 
-        // Right-axis price pill
         const tagY = Math.max(padT, Math.min(H - padB - 13, y - 6.5));
         ctx.fillStyle = col;
         drawRoundRect(ctx, W - padR + 2, tagY, padR - 4, 13, 3);
@@ -829,7 +1063,6 @@
       });
     }
 
-    // Candles
     candles.forEach(function (c, i) {
       const cx = padL + (i + 0.5) * slotW;
       const isBull = Number(c.close) >= Number(c.open);
@@ -847,9 +1080,8 @@
       ctx.fillRect(cx - bodyW / 2, Math.min(yO, yC), bodyW, Math.max(1.8, Math.abs(yC - yO)));
     });
 
-    // VWAP overlay
     if (chart.overlays.vwap && chart.vwap.length) {
-      ctx.strokeStyle = pal.purple;
+      ctx.strokeStyle = pal.blue;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       chart.vwap.forEach(function (v, i) {
@@ -861,7 +1093,6 @@
       ctx.stroke();
     }
 
-    // Live LTP dashed line & pill
     const last = candles[n - 1];
     const lastC = Number(last.close);
     const yL = yOf(lastC);
@@ -880,9 +1111,222 @@
     drawRoundRect(ctx, W - padR + 2, pillY, padR - 4, 16, 4);
     ctx.fill();
     ctx.fillStyle = pal.pillText;
-    ctx.font = '800 8.5px ui-monospace, monospace';
+    ctx.font = '800 8.5px "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace';
     ctx.textAlign = 'center';
     ctx.fillText(lastC >= 10000 ? lastC.toFixed(0) : lastC.toFixed(1), W - padR + padR / 2, pillY + 11);
+  }
+
+  // =========================================================================
+  // 6b. MONTE CARLO HISTOGRAM CANVAS CHART (R1-E1: Mean line + ±1σ / ±2σ zones)
+  // =========================================================================
+  function renderMcHistCanvas(canvasId) {
+    const canvas = $(canvasId);
+    if (!canvas) return;
+
+    let values = [];
+    let mean = 0;
+    let std = 0;
+    let buckets = [];
+    try {
+      values = JSON.parse(canvas.getAttribute('data-values') || '[]');
+      mean = parseFloat(canvas.getAttribute('data-mean') || '0');
+      std = parseFloat(canvas.getAttribute('data-std') || '0');
+      buckets = JSON.parse(canvas.getAttribute('data-buckets') || '[]');
+    } catch (e) {
+      return;
+    }
+
+    const dpr = Math.min(global.devicePixelRatio || 1, 2);
+    const rect = canvas.parentElement ? canvas.parentElement.getBoundingClientRect() : canvas.getBoundingClientRect();
+    const W = Math.floor(Math.min(600, rect.width || 600));
+    const H = 200;
+
+    if (W < 120 || H < 50) return;
+
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    if (canvas.width !== Math.floor(W * dpr) || canvas.height !== Math.floor(H * dpr)) {
+      canvas.width = Math.floor(W * dpr);
+      canvas.height = Math.floor(H * dpr);
+    }
+
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+
+    const pal = getCanvasPalette();
+    ctx.fillStyle = pal.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    const padL = 46, padR = 16, padT = 32, padB = 30;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+
+    if ((!values.length && !buckets.length) || plotW <= 0 || plotH <= 0) return;
+
+    const bucketCenters = {
+      'Stop (-1R)': -1.0,
+      '-1R to 0R': -0.5,
+      '0R to +1R': 0.5,
+      '+1R to +2R': 1.5,
+      'Target (+2R)': 2.0
+    };
+
+    let minVal = -1.2;
+    let maxVal = 2.2;
+    if (values.length) {
+      let lo = values[0], hi = values[0];
+      for (let i = 1; i < values.length; i++) {
+        if (values[i] < lo) lo = values[i];
+        if (values[i] > hi) hi = values[i];
+      }
+      minVal = Math.min(lo, mean - 2 * std, -1.0);
+      maxVal = Math.max(hi, mean + 2 * std, 2.0);
+    }
+    const span = Math.max(0.5, maxVal - minVal);
+    const xMin = minVal - span * 0.08;
+    const xMax = maxVal + span * 0.08;
+    const xRange = xMax - xMin;
+
+    const xOf = function (r) {
+      return padL + ((r - xMin) / xRange) * plotW;
+    };
+
+    // Draw ±2σ and ±1σ shaded zones
+    if (std > 0) {
+      const sd2L = Math.max(padL, xOf(mean - 2 * std));
+      const sd2R = Math.min(W - padR, xOf(mean + 2 * std));
+      if (sd2R > sd2L) {
+        ctx.fillStyle = 'rgba(37, 99, 235, 0.08)';
+        ctx.fillRect(sd2L, padT, sd2R - sd2L, plotH);
+      }
+      const sd1L = Math.max(padL, xOf(mean - std));
+      const sd1R = Math.min(W - padR, xOf(mean + std));
+      if (sd1R > sd1L) {
+        ctx.fillStyle = 'rgba(37, 99, 235, 0.16)';
+        ctx.fillRect(sd1L, padT, sd1R - sd1L, plotH);
+      }
+    }
+
+    // Horizontal baseline
+    ctx.strokeStyle = pal.divider;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padL, H - padB);
+    ctx.lineTo(W - padR, H - padB);
+    ctx.stroke();
+
+    // Draw histogram bars
+    const maxCount = Math.max.apply(null, buckets.map(function (b) { return b.count || 0; }).concat([1]));
+    buckets.forEach(function (b) {
+      const center = bucketCenters[b.label] !== undefined ? bucketCenters[b.label] : 0;
+      const x = xOf(center);
+      const barW = Math.max(14, Math.min(plotW / 6, plotW * 0.14));
+      const barH = Math.max(2, Math.floor(((b.count || 0) / maxCount) * (plotH * 0.84)));
+
+      let color = '#2563eb';
+      if (String(b.label).indexOf('Target') === 0) color = pal.bull;
+      else if (String(b.label).indexOf('Stop') === 0) color = pal.bear;
+
+      const barX = Math.floor(x - barW / 2);
+      const barY = H - padB - barH;
+      ctx.fillStyle = color;
+      ctx.fillRect(barX, barY, barW, barH);
+
+      ctx.fillStyle = pal.axisText;
+      ctx.font = '700 8px "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(Number(b.pct || 0).toFixed(1) + '%', x, Math.max(padT + 8, barY - 3));
+    });
+
+    // Draw ±1σ dashed lines & ±2σ dotted lines
+    if (std > 0) {
+      ctx.save();
+      ctx.strokeStyle = pal.blue;
+      ctx.lineWidth = 1.25;
+      ctx.setLineDash([5, 3]);
+      [mean - std, mean + std].forEach(function (xVal) {
+        const x = xOf(xVal);
+        if (x >= padL && x <= W - padR) {
+          ctx.beginPath();
+          ctx.moveTo(x, padT);
+          ctx.lineTo(x, H - padB);
+          ctx.stroke();
+        }
+      });
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 3]);
+      [mean - 2 * std, mean + 2 * std].forEach(function (xVal) {
+        const x = xOf(xVal);
+        if (x >= padL && x <= W - padR) {
+          ctx.beginPath();
+          ctx.moveTo(x, padT);
+          ctx.lineTo(x, H - padB);
+          ctx.stroke();
+        }
+      });
+      ctx.restore();
+    }
+
+    // Draw Mean vertical line + pill badge
+    const meanX = Math.max(padL + 2, Math.min(W - padR - 2, xOf(mean)));
+    ctx.save();
+    ctx.strokeStyle = '#dc2626';
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.moveTo(meanX, padT);
+    ctx.lineTo(meanX, H - padB);
+    ctx.stroke();
+    ctx.restore();
+
+    const lblText = 'Mean ' + (mean >= 0 ? '+' : '') + mean.toFixed(2) + 'R';
+    const pillW = 68;
+    const pillX = Math.max(padL, Math.min(W - padR - pillW, meanX - pillW / 2));
+    ctx.fillStyle = '#dc2626';
+    drawRoundRect(ctx, pillX, 6, pillW, 15, 4);
+    ctx.fill();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = '700 8.5px "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(lblText, pillX + pillW / 2, 16.5);
+
+    // X-axis bucket labels
+    ctx.fillStyle = pal.axisText;
+    ctx.font = '600 8px "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace';
+    ctx.textAlign = 'center';
+    Object.keys(bucketCenters).forEach(function (label) {
+      const x = xOf(bucketCenters[label]);
+      if (x >= padL && x <= W - padR) {
+        ctx.fillText(label, x, H - padB + 15);
+      }
+    });
+
+    // Y-axis label
+    ctx.save();
+    ctx.translate(12, padT + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.fillText('Replays', 0, 0);
+    ctx.restore();
+
+    // Compact legend (top-left)
+    ctx.fillStyle = 'rgba(37, 99, 235, 0.16)';
+    ctx.fillRect(padL + 2, 9, 12, 9);
+    ctx.fillStyle = pal.axisText;
+    ctx.font = '600 8px "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('±1σ', padL + 17, 16.5);
+    ctx.fillStyle = 'rgba(37, 99, 235, 0.08)';
+    ctx.fillRect(padL + 44, 9, 12, 9);
+    ctx.fillStyle = pal.axisText;
+    ctx.fillText('±2σ', padL + 59, 16.5);
+  }
+
+  function renderAllMcCanvases(rootEl) {
+    const scope = rootEl || document;
+    scope.querySelectorAll('canvas[data-buckets]').forEach(function (c) {
+      if (c.id) renderMcHistCanvas(c.id);
+    });
   }
 
   // =========================================================================
@@ -903,21 +1347,24 @@
     }
 
     const chartId = page === 'orb' ? 'orb-chart' : 'levels-chart';
-    const url = '/api/stock?symbol=' + encodeURIComponent(sym) + '&interval=' + encodeURIComponent(iv);
+    const url = page === 'levels'
+      ? '/api/levelschart?symbol=' + encodeURIComponent(sym) + '&interval=' + encodeURIComponent(iv)
+      : '/api/stock?symbol=' + encodeURIComponent(sym) + '&interval=' + encodeURIComponent(iv);
     const labelEl = $(chartId + '-indicators');
     if (labelEl) labelEl.textContent = 'Loading ' + sym + ' (' + iv + ') candles…';
 
     fetchAsyncDetail(url)
       .then(function (data) {
-        if (!data || data.error || !data.chart || !data.chart.candles || !data.chart.candles.length) {
-          throw new Error((data && data.error) || 'No candle data for ' + iv);
+        const chartPayload = (data && data.chart) ? data.chart : data;
+        if (!chartPayload || chartPayload.error || !chartPayload.candles || !chartPayload.candles.length) {
+          throw new Error((chartPayload && chartPayload.error) || (data && data.error) || 'No candle data for ' + iv);
         }
         if (typeof global.bhanuCandleUpdate === 'function' && (global.bhanuCandles || {})[chartId]) {
-          global.bhanuCandleUpdate(chartId, data.chart);
+          global.bhanuCandleUpdate(chartId, chartPayload);
         } else if (typeof global.bhanuCandleRender === 'function') {
           const el = $(chartId);
           if (el) el.innerHTML = '';
-          global.bhanuCandleRender(chartId, data.chart, null);
+          global.bhanuCandleRender(chartId, chartPayload, null);
         }
         showToast(sym + ' switched to ' + iv + ' timeframe');
       })
@@ -978,13 +1425,13 @@
       }
       if (listSlot && orb && orb.html) {
         listSlot.innerHTML = orb.html;
+        syncOrbStatesWithLivePrices();
       }
       const probSlot = $('bot-tm-prob-slot');
       if (probSlot && tm && tm.html) {
         probSlot.innerHTML = tm.html;
       }
 
-      // Extract real scanned symbols for the live ribbon
       if (orb && orb.html) {
         const matches = orb.html.match(/symbol=([A-Z0-9.^]+)/g) || [];
         const syms = matches.map(function (m) { return m.replace('symbol=', ''); });
@@ -1019,7 +1466,7 @@
   }
 
   // =========================================================================
-  // 9. TIME MACHINE (10,000 REPLAYS TRADE-INPUT FORM)
+  // 9. TIME MACHINE (10,000 REPLAYS TRADE-INPUT FORM + CANVAS DRAW)
   // =========================================================================
   function submitTimeMachineCheck(ev) {
     if (ev && ev.preventDefault) ev.preventDefault();
@@ -1044,6 +1491,8 @@
           return;
         }
         out.innerHTML = data.html || '<p class="muted">Replay complete.</p>';
+        // innerHTML does not execute inline <script> tags, so draw MC canvases directly
+        renderAllMcCanvases(out);
         const mc = data.monte_carlo || {};
         if (mc.available) {
           showToast(
@@ -1058,6 +1507,24 @@
         out.innerHTML = '<p class="feed-message">Time Machine unavailable — ' + escHtml(err.message) + '</p>';
       });
     return false;
+  }
+
+  function observeLazyMcCanvases() {
+    if (typeof MutationObserver === 'undefined') return;
+    ['timemachine-body', 'tm-check-result'].forEach(function (id) {
+      const host = $(id);
+      if (!host) return;
+      const obs = new MutationObserver(function () {
+        renderAllMcCanvases(host);
+      });
+      obs.observe(host, { childList: true, subtree: true });
+    });
+    // Also draw when a collapsed <details> containing a net histogram is opened
+    document.addEventListener('toggle', function (e) {
+      if (e.target && e.target.tagName === 'DETAILS' && e.target.open) {
+        renderAllMcCanvases(e.target);
+      }
+    }, true);
   }
 
   // =========================================================================
@@ -1077,8 +1544,6 @@
     saveStorage(STORAGE_KEYS.paper, state.paper);
   }
 
-  // Paper desk live price for the selected symbol (from /api/quote).
-  // Used by BUY CALL / BUY PUT / SELL when the Entry field is blank.
   const paperLive = { symbol: null, price: null };
 
   function updatePaperLivePrice() {
@@ -1111,18 +1576,23 @@
 
   function resolveLivePriceForSymbol(sym) {
     const s = String(sym || '').toUpperCase();
+    if (!s) return null;
     if (paperLive.symbol === s && paperLive.price) {
       return Number(paperLive.price);
     }
-    if (s.indexOf('BANKNIFTY') !== -1 && state.quotes['^NSEBANK'] && state.quotes['^NSEBANK'].price) {
-      return Number(state.quotes['^NSEBANK'].price);
+    if (s.indexOf('BANKNIFTY') !== -1 || s === '^NSEBANK') {
+      if (state.liveTicks['^NSEBANK'] && state.liveTicks['^NSEBANK'].ltp) return Number(state.liveTicks['^NSEBANK'].ltp);
+      if (state.quotes['^NSEBANK'] && state.quotes['^NSEBANK'].price) return Number(state.quotes['^NSEBANK'].price);
     }
-    if (s.indexOf('SENSEX') !== -1 && state.quotes['^BSESN'] && state.quotes['^BSESN'].price) {
-      return Number(state.quotes['^BSESN'].price);
+    if (s.indexOf('SENSEX') !== -1 || s === '^BSESN') {
+      if (state.liveTicks['^BSESN'] && state.liveTicks['^BSESN'].ltp) return Number(state.liveTicks['^BSESN'].ltp);
+      if (state.quotes['^BSESN'] && state.quotes['^BSESN'].price) return Number(state.quotes['^BSESN'].price);
     }
-    if (s.indexOf('NIFTY') !== -1 && state.quotes['^NSEI'] && state.quotes['^NSEI'].price) {
-      return Number(state.quotes['^NSEI'].price);
+    if (s.indexOf('NIFTY') !== -1 || s === '^NSEI') {
+      if (state.liveTicks['^NSEI'] && state.liveTicks['^NSEI'].ltp) return Number(state.liveTicks['^NSEI'].ltp);
+      if (state.quotes['^NSEI'] && state.quotes['^NSEI'].price) return Number(state.quotes['^NSEI'].price);
     }
+    if (state.quotes[s] && state.quotes[s].price) return Number(state.quotes[s].price);
     return null;
   }
 
@@ -1148,13 +1618,26 @@
     }
 
     const isPutOrSell = (side === 'BUY PUT' || side === 'SELL');
-    const stop = parseFloat(slEl && slEl.value ? slEl.value : '') ||
-      Number((isPutOrSell ? entry * 1.005 : entry * 0.995).toFixed(2));
+    const slInput = slEl && slEl.value ? parseFloat(slEl.value) : null;
+    if (slInput === null || isNaN(slInput)) {
+      if (!confirm('Stop Loss set nahi hai. Kya aap bina SL ke order place karna chahte hain?')) {
+        return;
+      }
+    }
+    const stop = slInput || Number((isPutOrSell ? entry * 1.005 : entry * 0.995).toFixed(2));
     const target = parseFloat(tgtEl && tgtEl.value ? tgtEl.value : '') ||
       Number((isPutOrSell ? entry * 0.99 : entry * 1.01).toFixed(2));
 
     const checks = document.querySelectorAll('.pro-pre-chk');
     const checked = document.querySelectorAll('.pro-pre-chk:checked').length;
+
+    const charges = Math.round(40 + qty * entry * 0.00018);
+    const risk = Math.abs(entry - stop) * qty;
+
+    if (!confirm('CONFIRM ORDER:\n' + side + ' ' + symbol + ' x' + qty + '\nEntry: ₹' + fmtNum(entry) +
+        '\nEst. Charges: ₹' + fmtNum(charges) + '\nRisk: ₹' + fmtNum(risk) + '\n\nProceed?')) {
+      return;
+    }
 
     const pos = {
       id: 'PT-' + String(state.paper.nextId++).padStart(4, '0'),
@@ -1190,7 +1673,6 @@
     state.paper.positions.splice(idx, 1);
     persistPaperState();
 
-    // Auto-log to Trade Journal
     const risk = Math.max(1, Math.abs(p.entry - p.stop) * p.qty);
     const rMult = (pnl / risk).toFixed(2);
     state.journal.unshift({
@@ -1582,6 +2064,7 @@
         Object.keys(state.canvasCharts).forEach(function (cid) {
           renderCanvasChart(cid);
         });
+        renderAllMcCanvases();
       }, 120);
     });
   }
@@ -1591,6 +2074,8 @@
     initPaperState();
     syncActiveNav();
     initResizeObserver();
+    observeLazyMcCanvases();
+    renderAllMcCanvases();
 
     // 1-second IST session clock
     paintClock();
@@ -1601,7 +2086,6 @@
     calcRiskGuardian();
     renderJournal();
     updateChecklistBadge();
-    // Paper desk: show the selected symbol's live price, refresh every 5s.
     if ($('pro-paper-symbol')) {
       updatePaperLivePrice();
       state.timers.paperQuote = setInterval(updatePaperLivePrice, 5000);
@@ -1629,7 +2113,7 @@
     });
   }
 
-  // Expose public API & compatible global helpers
+  // Expose public API & compatible global helpers (including R1-E1 & R1-D1)
   global.BhanuPro = {
     state: state,
     applyTheme: applyTheme,
@@ -1637,6 +2121,10 @@
     toast: showToast,
     mountCanvasChart: mountCanvasChart,
     renderCanvasChart: renderCanvasChart,
+    renderMcHistCanvas: renderMcHistCanvas,
+    renderAllMcCanvases: renderAllMcCanvases,
+    renderOrbState: renderOrbState,
+    syncOrbStatesWithLivePrices: syncOrbStatesWithLivePrices,
     switchTimeframe: switchChartTimeframe,
     rescanBot: triggerBotRescan,
     submitTimeMachine: submitTimeMachineCheck,
@@ -1658,7 +2146,9 @@
     resetReplay: resetReplay
   };
 
-  // Drop-in replacement for legacy theme button onclick="bhanuTheme()"
+  // Global exposure so inline checks and legacy handlers succeed
+  global.renderMcHistCanvas = renderMcHistCanvas;
+  global.renderOrbState = renderOrbState;
   global.bhanuTheme = toggleTheme;
   global.bhanuTmCheckSubmit = submitTimeMachineCheck;
 
