@@ -5,8 +5,9 @@ things DayTrader does on the backend (CLI only until now):
 
 1. **Monte Carlo Time Machine** — today's best ORB setup replayed
    10,000 times on the symbol's own last 60 days of 5-minute bars
-   (``bhanu.timemachine``). Win rate, avg R, best case / worst case.
-   A reality check, not proof of an edge.
+   (``bhanu.timemachine``). Win rate, avg R (gross & net of costs),
+   best case / worst case, limitations, and brokerage/slippage
+   scenarios. A reality check, not proof of an edge.
 2. **Trade check** — the same setup through the risk gate
    (PASS/BLOCK), the four-limit sizing, how many such positions the
    budget allows, SL/TP and R:R.
@@ -41,6 +42,32 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 MC_REPLAYS = 10_000  # DayTrader default for the Time Machine
 BACKTEST_RANGE = "1mo"
+
+#: Default cost assumptions passed to ``timemachine.monte_carlo`` for the
+#: net-of-costs histogram (``histogram_net`` / ``avg_r_net``):
+#:   - ``DEFAULT_BROKERAGE_PER_ORDER``: ₹20/order (standard Indian discount
+#:     broker flat fee; ₹0 in ``timemachine.py`` raw default).
+#:   - ``DEFAULT_SLIPPAGE_BPS``: 5 bps/side (0.05% per side; 0 bps in
+#:     ``timemachine.py`` raw default).
+DEFAULT_BROKERAGE_PER_ORDER: float = 20.0
+DEFAULT_SLIPPAGE_BPS: float = 5.0
+
+#: Scenario grids rendered in the Charges & Slippage table on /timemachine:
+#: brokerage in ₹/order and slippage in bps/side (including the 0 / 0
+#: zero-cost baseline from ``timemachine.py``).
+BROKERAGE_SCENARIOS: list[float] = [0.0, 20.0, 40.0]
+SLIPPAGE_SCENARIOS: list[float] = [0.0, 5.0, 10.0]
+
+#: Real methodological limitations of the Monte Carlo Time Machine
+#: (mirrors ``bhanu/timemachine.py`` module docstring).
+MC_LIMITATIONS: list[str] = [
+    "Resampled 5-minute bars destroy autocorrelation, volatility clustering, and intraday trend persistence.",
+    "Assumes the next session behaves like the last 60 days of full 75-bar NSE sessions (regime shifts are not modelled).",
+    "A gap through the stop-loss is scored as exactly -1R even though a real fill can suffer worse slippage.",
+    "Gross outcomes ignore brokerage, STT, exchange fees, GST, and bid-ask slippage — check the Net R distribution and Charges & Slippage scenarios.",
+    "For options trades, spot/underlying bar replays ignore theta decay and IV crush; run replays on the option premium series instead.",
+    "Reality check only, not proof of an edge — never trade on Monte Carlo odds alone.",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -93,11 +120,17 @@ def _bars_to_mc(bars) -> list[dict]:
     return out
 
 
-def monte_carlo_summary(setup: dict[str, Any]) -> dict[str, Any]:
+def monte_carlo_summary(
+    setup: dict[str, Any],
+    brokerage_per_order: float = DEFAULT_BROKERAGE_PER_ORDER,
+    slippage_bps: float = DEFAULT_SLIPPAGE_BPS,
+) -> dict[str, Any]:
     """10,000-replay Monte Carlo for ``setup`` (a levels row).
 
-    Returns the MC figures plus a verdict and the best/worst case in R
-    (best = target hit, worst = stop hit). On any failure returns
+    Returns the MC figures (gross and net of default costs), verdict,
+    best/worst case in R, ``mc_limitations``, ``histogram``,
+    ``histogram_net``, ``brokerage_scenarios``, and
+    ``slippage_scenarios``. On any failure returns
     ``{"available": False, "reason": ...}`` — never fake numbers.
     """
     entry = setup.get("entry")
@@ -127,28 +160,60 @@ def monte_carlo_summary(setup: dict[str, Any]) -> dict[str, Any]:
             direction=str(direction),
             n=MC_REPLAYS,
             collect_outcomes=True,
+            brokerage_per_order=float(brokerage_per_order),
+            slippage_bps=float(slippage_bps),
         )
     except ValueError as exc:
         return {"available": False, "reason": str(exc)}
     v = tm_mod.verdict(mc["target_first_pct"], mc["stop_first_pct"], mc["reward_risk"])
-    risk = abs(float(entry) - float(stop))
-    reward = abs(float(target) - float(entry))
-    # Distribution of the 10,000 replay outcomes (R buckets) for the chart.
+    entry_f = float(entry)
+    stop_f = float(stop)
+    target_f = float(target)
+    risk = abs(entry_f - stop_f)
+    reward = abs(target_f - entry_f)
+
+    # Gross and net distributions of the 10,000 replay outcomes (R buckets).
     from bhanu import charts as charts_mod
 
     histogram = charts_mod.mc_histogram(mc.get("outcomes", []), mc["avg_r"])
+    avg_r_net = mc.get("avg_r_net", mc["avg_r"])
+    histogram_net = charts_mod.mc_histogram(
+        mc.get("outcomes_net", mc.get("outcomes", [])), avg_r_net
+    )
+
+    # Per-scenario cost table (also consumable alongside the raw scenario grids).
+    cost_scenarios: list[dict[str, float]] = []
+    for br in BROKERAGE_SCENARIOS:
+        for sl in SLIPPAGE_SCENARIOS:
+            slip_factor = sl / 10000.0
+            cost_rs = 2.0 * br + 2.0 * entry_f * slip_factor
+            cost_r = cost_rs / risk if risk else 0.0
+            cost_scenarios.append(
+                {
+                    "brokerage_per_order": br,
+                    "slippage_bps": sl,
+                    "cost_per_trade_rs": round(cost_rs, 2),
+                    "cost_in_r": round(cost_r, 4),
+                    "avg_r_gross": round(mc["avg_r"], 4),
+                    "avg_r_net": round(mc["avg_r"] - cost_r, 4),
+                }
+            )
+
     return {
         "available": True,
         "symbol": symbol,
         "direction": direction,
-        "entry": float(entry),
-        "stop": float(stop),
-        "target": float(target),
+        "entry": entry_f,
+        "stop": stop_f,
+        "target": target_f,
         "n": mc["n"],
         "target_first_pct": mc["target_first_pct"],
         "stop_first_pct": mc["stop_first_pct"],
         "neither_pct": mc["neither_pct"],
         "avg_r": mc["avg_r"],
+        "avg_r_net": avg_r_net,
+        "brokerage_per_order": float(brokerage_per_order),
+        "slippage_bps": float(slippage_bps),
         "reward_risk": mc["reward_risk"],
         # Best case = target hit first (+R), worst case = stop hit first (-1R).
         "best_case_r": reward / risk if risk else 0.0,
@@ -157,6 +222,11 @@ def monte_carlo_summary(setup: dict[str, Any]) -> dict[str, Any]:
         "edge_pts": v["edge_pts"],
         "break_even_pct": v["break_even_pct"],
         "histogram": histogram,
+        "histogram_net": histogram_net,
+        "mc_limitations": list(MC_LIMITATIONS),
+        "brokerage_scenarios": list(BROKERAGE_SCENARIOS),
+        "slippage_scenarios": list(SLIPPAGE_SCENARIOS),
+        "cost_scenarios": cost_scenarios,
     }
 
 
@@ -183,17 +253,6 @@ def check_trade(symbol, entry, stop, target, direction) -> dict[str, Any]:
     or the poller. Returns ``{"ok": True, ...}`` on success or
     ``{"ok": False, "error": ...}`` on any problem — never raises for
     bad input.
-
-    Validation rules (in order):
-    * symbol must be in the universe (3 indices + 39 F&O stocks);
-      anything else — including option symbols — is refused, because
-      the replay runs on the symbol's own spot/index bars and an
-      option premium needs its own premium series (theta decay makes
-      spot-bar replays meaningless for premium outcomes).
-    * entry, stop, target must be finite positive numbers.
-    * direction must be CALL/long or PUT/short.
-    * CALL (long): stop < entry < target.
-    * PUT (short): target < entry < stop.
     """
     raw_symbol = "" if symbol is None else str(symbol).strip().upper()
     if not raw_symbol or raw_symbol not in data_mod.UNIVERSE:
@@ -405,7 +464,8 @@ def main() -> int:
     if mc.get("available"):
         print(f"Monte Carlo ({mc['n']} replays): target first {mc['target_first_pct']:.1f}%, "
               f"stop first {mc['stop_first_pct']:.1f}%, neither {mc['neither_pct']:.1f}%, "
-              f"avg {mc['avg_r']:+.3f}R, best +{mc['best_case_r']:.1f}R, worst {mc['worst_case_r']:.1f}R, "
+              f"avg {mc['avg_r']:+.3f}R (net {mc['avg_r_net']:+.3f}R), "
+              f"best +{mc['best_case_r']:.1f}R, worst {mc['worst_case_r']:.1f}R, "
               f"verdict: {mc['verdict']}")
     else:
         print(f"Monte Carlo unavailable: {mc.get('reason')}")
