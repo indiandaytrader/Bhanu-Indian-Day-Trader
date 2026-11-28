@@ -1,12 +1,18 @@
 """Live support / resistance levels + entry/exit display for NSE indices.
 
-What it shows (per index: NIFTY, BANKNIFTY, SENSEX)
----------------------------------------------------
+What it shows (per index: NIFTY, BANKNIFTY, SENSEX, or any universe symbol)
+---------------------------------------------------------------------------
 * Current price (last 5m close).
 * Nearest support / nearest resistance — the closest level below / above
   the price, drawn from: recent swing highs/lows on 5m bars (last 5
   sessions), previous-day high/low (PDH/PDL), and today's opening-range
   high/low (09:15-09:30 IST).
+* Enriched per-level metrics: ``strength`` (1-100), ``touches`` count,
+  ``distance_pts`` / ``distance_pct`` from current price, ``kind``
+  (``PDH`` / ``PDL`` / ``ORB`` / ``swing``), ``side`` (``support`` /
+  ``resistance``), and ``zone_low`` / ``zone_high`` for shaded zones.
+* Top ``summary`` dict: ``trend``, ``support``, ``resistance``,
+  ``distance``, ``setup``, ``risk_reward``.
 * PDH / PDL, ORB high / ORB low.
 * The ORB signal for today (from ``bhanu.scanner``) with entry, stop
   (range midpoint, with the 1.5x ATR stop alongside) and targets
@@ -167,6 +173,170 @@ def nearest_levels(price: float, levels: list[float]) -> tuple[float | None, flo
 
 
 # ---------------------------------------------------------------------------
+# Level enrichment: strength (1-100), touches, distance, shaded zones, summary
+# ---------------------------------------------------------------------------
+
+def _classify_kind(
+    level_price: float,
+    price: float,
+    pdh: float | None,
+    pdl: float | None,
+    orb_high: float | None,
+    orb_low: float | None,
+) -> str:
+    """Tag a clustered level with its highest-priority kind: PDH/PDL/ORB/swing."""
+    tol = max(abs(price) * CLUSTER_TOL_PCT / 100.0, 1e-6)
+    if pdh is not None and abs(level_price - pdh) <= tol:
+        return "PDH"
+    if pdl is not None and abs(level_price - pdl) <= tol:
+        return "PDL"
+    if orb_high is not None and abs(level_price - orb_high) <= tol:
+        return "ORB"
+    if orb_low is not None and abs(level_price - orb_low) <= tol:
+        return "ORB"
+    return "swing"
+
+
+def score_level(
+    level_price: float,
+    price: float,
+    bars_5m: pd.DataFrame,
+    kind: str,
+    raw_levels: list[float],
+    atr: float | None = None,
+) -> dict[str, Any]:
+    """Compute strength (1-100), touches, distance, and shaded zone for one level.
+
+    Strength formula (capped 1-100):
+        strength = clamp(1, 100, round(touch_score + recency_score + vol_score + confluence_score))
+
+    where:
+    * ``touch_score`` (0-45): ``min(45, touches * 12)``, where ``touches`` is
+      the number of 5m bars in ``bars_5m`` whose ``[low, high]`` range trades
+      within ``CLUSTER_TOL_PCT`` (0.05%) of ``level_price`` (min 1).
+    * ``recency_score`` (0-25): ``25 * (last_touch_idx / max(1, n - 1))`` —
+      levels tested more recently score higher.
+    * ``vol_score`` (0-15): ``min(15, 7.5 * (avg_touch_vol / mean_vol))``
+      when positive volume data exists on the 5m bars, else 0.
+    * ``confluence_score`` (0-15): base weight by kind (PDH/PDL = 12,
+      ORB = 10, swing = 6) plus ``+3`` if two or more raw levels clustered
+      into this zone (capped at 15).
+    """
+    tol = max(abs(price) * CLUSTER_TOL_PCT / 100.0, 1e-6)
+    n = len(bars_5m)
+    touches = 0
+    last_touch_idx = 0
+    touch_vols: list[float] = []
+    has_vol = "volume" in bars_5m.columns
+
+    if n > 0:
+        highs = bars_5m["high"].to_numpy(dtype=float)
+        lows = bars_5m["low"].to_numpy(dtype=float)
+        vols = bars_5m["volume"].to_numpy(dtype=float) if has_vol else None
+        for i in range(n):
+            if lows[i] - tol <= level_price <= highs[i] + tol:
+                touches += 1
+                last_touch_idx = i
+                if vols is not None and pd.notna(vols[i]) and vols[i] > 0:
+                    touch_vols.append(float(vols[i]))
+
+    touches_out = max(1, touches)
+    touch_score = min(45.0, touches_out * 12.0)
+    recency_score = (25.0 * last_touch_idx / max(1, n - 1)) if touches > 0 and n > 1 else 5.0
+
+    vol_score = 0.0
+    if has_vol and touch_vols:
+        pos_vols = bars_5m["volume"].dropna()
+        pos_vols = pos_vols[pos_vols > 0]
+        if not pos_vols.empty:
+            mean_vol = float(pos_vols.mean())
+            if mean_vol > 0:
+                avg_touch_vol = sum(touch_vols) / len(touch_vols)
+                vol_score = min(15.0, 7.5 * (avg_touch_vol / mean_vol))
+
+    kind_base = {"PDH": 12.0, "PDL": 12.0, "ORB": 10.0, "swing": 6.0}.get(kind, 6.0)
+    cluster_count = sum(1 for lv in raw_levels if abs(lv - level_price) <= tol)
+    confluence_score = min(15.0, kind_base + (3.0 if cluster_count >= 2 else 0.0))
+
+    strength = max(1, min(100, int(round(touch_score + recency_score + vol_score + confluence_score))))
+
+    dist_pts = round(level_price - price, 2)
+    dist_pct = round((dist_pts / price) * 100.0, 2) if price else 0.0
+    side = "support" if level_price < price else "resistance"
+
+    zone_half = max(abs(price) * 0.0008, (float(atr) * 0.25) if atr else 0.0)
+    zone_low = round(level_price - zone_half, 2)
+    zone_high = round(level_price + zone_half, 2)
+
+    return {
+        "price": round(float(level_price), 2),
+        "kind": kind,
+        "side": side,
+        "strength": strength,
+        "touches": touches_out,
+        "distance_pts": dist_pts,
+        "distance_pct": dist_pct,
+        "zone_low": zone_low,
+        "zone_high": zone_high,
+    }
+
+
+def _build_summary(
+    price: float,
+    today_bars: pd.DataFrame,
+    support: float | None,
+    resistance: float | None,
+    signal: str | None,
+    entry: float | None,
+    stop: float | None,
+    target: float | None,
+) -> dict[str, Any]:
+    """Top summary dict: trend, support, resistance, distance, setup, risk_reward."""
+    trend = "Range"
+    if not today_bars.empty:
+        day_open = float(today_bars["open"].iloc[0])
+        if day_open > 0:
+            chg_pct = (price - day_open) / day_open * 100.0
+            if chg_pct >= 0.20:
+                trend = "Bullish"
+            elif chg_pct <= -0.20:
+                trend = "Bearish"
+
+    sup_pts = round(price - support, 2) if support is not None else None
+    sup_pct = round((sup_pts / price) * 100.0, 2) if (sup_pts is not None and price) else None
+    res_pts = round(resistance - price, 2) if resistance is not None else None
+    res_pct = round((res_pts / price) * 100.0, 2) if (res_pts is not None and price) else None
+
+    if signal == "long":
+        setup_label = "CALL"
+    elif signal == "short":
+        setup_label = "PUT"
+    else:
+        setup_label = "Watching"
+
+    rr_label = "—"
+    if entry is not None and stop is not None and target is not None:
+        risk = abs(float(entry) - float(stop))
+        reward = abs(float(target) - float(entry))
+        if risk > 0:
+            rr_label = f"1:{reward / risk:.1f}"
+
+    return {
+        "trend": trend,
+        "support": round(support, 2) if support is not None else None,
+        "resistance": round(resistance, 2) if resistance is not None else None,
+        "distance": {
+            "support_pts": sup_pts,
+            "support_pct": sup_pct,
+            "resistance_pts": res_pts,
+            "resistance_pct": res_pct,
+        },
+        "setup": setup_label,
+        "risk_reward": rr_label,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Per-symbol levels + ORB entry/exit
 # ---------------------------------------------------------------------------
 
@@ -175,15 +345,15 @@ def compute_levels(
     yahoo_symbol: str | None = None,
     lookback_sessions: int = LOOKBACK_SESSIONS,
 ) -> dict[str, Any]:
-    """Live levels + ORB entry/exit for one index.
+    """Live levels + ORB entry/exit for one index or stock.
 
     Fetches 5m bars (``lookback_sessions`` sessions) and daily bars,
-    then returns a dict with: symbol, price, nearest_support,
-    nearest_resistance, pdh, pdl, orb_high, orb_low, swing_highs,
-    swing_lows, levels (all clustered S/R levels), atr, and the ORB
-    signal (``signal``: "long"/"short"/None, ``entry``, ``stop``,
-    ``atr_stop``, ``target``). Raises :class:`DataError` when the fetch
-    fails — never returns fabricated levels.
+    then returns a dict with all existing fields plus enriched
+    ``strength``, ``touches``, ``distance_pts``, ``distance_pct``,
+    ``level_details`` (per-level dicts with kind/side/strength/touches/
+    distance/zone_low/zone_high), and ``summary`` (trend, support,
+    resistance, distance, setup, risk_reward). Raises :class:`DataError`
+    when the fetch fails — never returns fabricated levels.
     """
     yahoo_symbol = yahoo_symbol or INDICES[symbol]
     bars_5m = fetch_intraday_bars(yahoo_symbol, interval="5m", days=lookback_sessions)
@@ -209,12 +379,21 @@ def compute_levels(
     support, resistance = nearest_levels(price, levels)
     atr = atr_wilder(bars_5m)
 
+    # Enrich every clustered level with strength (1-100), touches, distance, kind & zone.
+    level_details: list[dict[str, Any]] = []
+    for lv in levels:
+        kind = _classify_kind(lv, price, pdh, pdl, orb_high, orb_low)
+        level_details.append(score_level(lv, price, bars_5m, kind, raw_levels, atr=atr))
+
+    sup_detail = next((d for d in level_details if support is not None and abs(d["price"] - support) < 0.02), None)
+    res_detail = next((d for d in level_details if resistance is not None and abs(d["price"] - resistance) < 0.02), None)
+
     # ORB signal + entry/exit (reuse the existing entry/exit rules).
     signal: str | None = None
     entry = stop = atr_stop = target = None
     tp1 = tp2 = tp3 = None
     hit = scanner_mod.orb_hit(today_bars)
-    if hit is not None:
+    if hit is not None and hit.get("direction") is not None:
         signal = hit["direction"]
         plan = entry_mod.plan_orb_entry(
             today_bars, direction=signal, symbol=symbol
@@ -239,6 +418,14 @@ def compute_levels(
                 except ValueError:
                     atr_stop = None
 
+    # Primary level metrics directly on the row dict (for table & summary access).
+    primary = sup_detail if (signal == "long" and sup_detail) else (
+        res_detail if (signal == "short" and res_detail) else (sup_detail or res_detail)
+    )
+    summary = _build_summary(
+        price, today_bars, support, resistance, signal, entry, stop, target
+    )
+
     return {
         "symbol": symbol,
         "price": price,
@@ -251,6 +438,20 @@ def compute_levels(
         "swing_highs": swing_highs,
         "swing_lows": swing_lows,
         "levels": levels,
+        "level_details": level_details,
+        "strength": primary["strength"] if primary else None,
+        "touches": primary["touches"] if primary else None,
+        "distance_pts": primary["distance_pts"] if primary else None,
+        "distance_pct": primary["distance_pct"] if primary else None,
+        "support_strength": sup_detail["strength"] if sup_detail else None,
+        "support_touches": sup_detail["touches"] if sup_detail else None,
+        "support_distance_pts": sup_detail["distance_pts"] if sup_detail else None,
+        "support_distance_pct": sup_detail["distance_pct"] if sup_detail else None,
+        "resistance_strength": res_detail["strength"] if res_detail else None,
+        "resistance_touches": res_detail["touches"] if res_detail else None,
+        "resistance_distance_pts": res_detail["distance_pts"] if res_detail else None,
+        "resistance_distance_pct": res_detail["distance_pct"] if res_detail else None,
+        "summary": summary,
         "atr": atr,
         "signal": signal,
         "entry": entry,
@@ -296,7 +497,8 @@ def main() -> int:
         res = row["nearest_resistance"]
         print(
             f"  {row['symbol']}: price {row['price']:,.2f} | "
-            f"support {sup:,.2f} | resistance {res:,.2f} | "
+            f"support {sup:,.2f} (str {row.get('support_strength')}) | "
+            f"resistance {res:,.2f} (str {row.get('resistance_strength')}) | "
             f"PDH {row['pdh']:,.2f} | PDL {row['pdl']:,.2f} | "
             f"ORB {row['orb_low']:,.2f}-{row['orb_high']:,.2f} | "
             f"signal {row['signal'] or 'None'} "
